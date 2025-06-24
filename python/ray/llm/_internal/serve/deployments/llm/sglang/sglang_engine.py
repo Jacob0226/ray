@@ -33,13 +33,15 @@ from ray.llm._internal.serve.deployments.llm.vllm.vllm_engine_stats import (
     VLLMEngineStatTracker,
     usage_counters,
 )
-from ray.llm._internal.serve.deployments.llm.vllm.vllm_models import (
+
+from ray.llm._internal.serve.deployments.llm.sglang.sglang_models import (
     KV_TRANSFER_PARAMS_KEY,
-    VLLMEmbeddingRequest,
-    VLLMEngineConfig,
-    VLLMGenerationRequest,
-    VLLMSamplingParams,
+    SGLangEmbeddingRequest,
+    SGLangEngineConfig,
+    SGLangGenerationRequest,
+    SGLangSamplingParams,
 )
+
 from ray.llm._internal.serve.deployments.utils.node_initialization_utils import (
     InitializeNodeOutput,
     initialize_node as initialize_node_util,
@@ -105,14 +107,12 @@ def _get_async_engine_args(llm_config: LLMConfig) -> "AsyncEngineArgs":
         }
     )
 
-
-def _get_vllm_engine_config(
+def _get_sglang_engine_config(
     llm_config: LLMConfig,
 ) -> Tuple["AsyncEngineArgs", "VllmConfig"]:
     async_engine_args = _get_async_engine_args(llm_config)
-    vllm_config = async_engine_args.create_engine_config()
-    return async_engine_args, vllm_config
-
+    sglang_config = async_engine_args.create_engine_config()
+    return async_engine_args, sglang_config
 
 def _clear_current_platform_cache():
     """Clear the cache of the current platform.
@@ -184,7 +184,7 @@ class _EngineBackgroundProcess:
         return self._error
 
 
-class VLLMEngine(LLMEngine):
+class SGLangEngine(LLMEngine):
     def __init__(
         self,
         llm_config: LLMConfig,
@@ -203,6 +203,7 @@ class VLLMEngine(LLMEngine):
 
         # Pick a random port in P/D case.
         kv_transfer_config = llm_config.engine_kwargs.get("kv_transfer_config", None)
+        print('Colin kv_transfer_config=', kv_transfer_config)
         if kv_transfer_config is not None:
             if not vllm.envs.VLLM_USE_V1:
                 logger.warning("Ray Serve LLM only supports P/D with v1 vLLM engine.")
@@ -235,13 +236,13 @@ class VLLMEngine(LLMEngine):
             llm_config, LLMConfig
         ), f"Got invalid config {llm_config} of type {type(llm_config)}"
         self.llm_config = llm_config
-        self.engine_config = VLLMEngineConfig.from_llm_config(llm_config)
+        self.engine_config = SGLangEngineConfig.from_llm_config(llm_config)
 
-        self._stats = VLLMEngineStatTracker()
+        self._stats = SGLANGEngineStatTracker()
         self.running = False
         self.model_config: "ModelConfig" = None
         self.engine = None
-        self.vllm_config: "VllmConfig" = None
+        self.sglang_config: "SGLangConfig" = None
 
         # Chat template content format (openai or string)
         self._resolved_content_format = None
@@ -249,7 +250,7 @@ class VLLMEngine(LLMEngine):
         self._tokenizer = None
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-        self._atokenize = vllm.utils.make_async(
+        self._atokenize = sglang.utils.make_async(                # need to check
             self._tokenize, executor=self._tokenizer_executor
         )
 
@@ -270,11 +271,11 @@ class VLLMEngine(LLMEngine):
         return encoded.input_ids
 
     async def start(self):
-        """Start the vLLM engine.
+        """Start the SGLang engine.
 
-        If the engine is already running, do nothing.
+        If the engine is already running, do nothing. 
         """
-        from vllm.entrypoints.chat_utils import (
+        from sglang.entrypoints.chat_utils import ( # need to check
             resolve_chat_template_content_format as _resolve_chat_template_content_format,
         )
 
@@ -313,10 +314,10 @@ class VLLMEngine(LLMEngine):
             tokenizer=self._tokenizer,
         )
 
-        logger.info("Started vLLM engine.")
+        logger.info("Started SGLang engine.")
 
     async def _start_engine(self) -> "EngineClient":
-        from vllm import envs
+        from sglang import envs
 
         # Since vLLM 0.8.0, the logic to determine v0/v1 engine is as follows:
         # 1. If VLLM_USE_V1 is not set, then it tries to use v1 engine. However,
@@ -786,7 +787,7 @@ class VLLMEngine(LLMEngine):
             ).exception
 
     async def embed(
-        self, vllm_embedding_request: VLLMEmbeddingRequest
+        self, sglang_embedding_request: SGLangEmbeddingRequest
     ) -> Tuple[List[List[float]], int]:
         """Return (embeddings, num_prompt_tokens)"""
 
@@ -799,19 +800,19 @@ class VLLMEngine(LLMEngine):
 
         generators: List[AsyncGenerator["PoolingRequestOutput", None]] = []
 
-        prompts = vllm_embedding_request.prompt
+        prompts = sglang_embedding_request.prompt
         if isinstance(prompts, str):
             prompts = [prompts]
 
         for i, prompt in enumerate(prompts):
-            request_id = f"{vllm_embedding_request.request_id}-{i}"
+            request_id = f"{sglang_embedding_request.request_id}-{i}"
             gen: AsyncGenerator["PoolingRequestOutput", None] = self.engine.encode(
-                prompt=vllm.inputs.TextPrompt(
+                prompt=sglang.inputs.TextPrompt(
                     prompt=prompt,
                 ),
-                pooling_params=vllm.pooling_params.PoolingParams(),
+                pooling_params=sglang.pooling_params.PoolingParams(),
                 request_id=request_id,
-                lora_request=vllm_embedding_request.lora_request,  # type: ignore
+                lora_request=sglang_embedding_request.lora_request,  # type: ignore
             )
             generators.append(gen)
 
@@ -821,7 +822,7 @@ class VLLMEngine(LLMEngine):
         for gen in generators:
             async for result in gen:
                 embedding = result.outputs.embedding
-                if vllm_embedding_request.encoding_format == "base64":
+                if sglang_embedding_request.encoding_format == "base64":
                     embedding = floats_to_base64(embedding)
 
                 embedding_data.append(embedding)
@@ -840,7 +841,7 @@ class VLLMEngine(LLMEngine):
             raise e from None
 
     @staticmethod
-    def _collect_usage_metrics(sampling_params: VLLMSamplingParams) -> None:
+    def _collect_usage_metrics(sampling_params: SGLangSamplingParams) -> None:
         if sampling_params.best_of is not None:
             usage_counters[ArgUsage.BEST_OF].inc()
 
@@ -875,7 +876,7 @@ class VLLMEngine(LLMEngine):
             usage_counters[ArgUsage.LOGPROBS].inc()
 
     def _parse_sampling_params(
-        self, sampling_params: VLLMSamplingParams
+        self, sampling_params: SGLangSamplingParams
     ) -> "VLLMInternalSamplingParams":
         """Parse the vllm sampling parameters from the prompt.
         This function is used to parse the sampling parameters from the prompt.
@@ -883,13 +884,13 @@ class VLLMEngine(LLMEngine):
         Args:
             sampling_params: The sampling parameters defined in ray.serve.llm.
         Returns:
-            vllm.SamplingParams, The parsed sampling parameters.
+            sglang.SamplingParams, The parsed sampling parameters.
         """
         self._collect_usage_metrics(sampling_params)
         try:
             if self.model_config is None:
                 raise RuntimeError(
-                    "VLLMEngine.model_config not set. Maybe VLLMEngine.start() was not called?"
+                    "SGLANGEngine.model_config not set. Maybe VLLMEngine.start() was not called?"
                 )
 
             log_probs = None
@@ -966,7 +967,7 @@ class VLLMEngine(LLMEngine):
                     KV_TRANSFER_PARAMS_KEY: sampling_params.kv_transfer_params
                 }
 
-            return vllm.SamplingParams(**kwargs)
+            return sglang.SamplingParams(**kwargs)
         except Exception as e:
             # Wrap the error in ValidationError so the status code
             # returned to the user is correct.
