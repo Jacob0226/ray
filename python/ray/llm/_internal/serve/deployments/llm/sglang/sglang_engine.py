@@ -7,7 +7,6 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Tuple
 
 import ray
-from ray.llm._internal.common.utils.import_utils import try_import
 from ray.llm._internal.serve.configs.constants import (
     MAX_NUM_TOPLOGPROBS_ALLOWED,
     MIN_NUM_TOPLOGPROBS_ALLOWED,
@@ -34,15 +33,13 @@ from ray.llm._internal.serve.deployments.llm.vllm.vllm_engine_stats import (
     VLLMEngineStatTracker,
     usage_counters,
 )
-
 from ray.llm._internal.serve.deployments.llm.vllm.vllm_models import (
     KV_TRANSFER_PARAMS_KEY,
-    SGLangEmbeddingRequest,
-    SGLangEngineConfig,
-    SGLangGenerationRequest,
-    SGLangSamplingParams,
+    VLLMEmbeddingRequest,
+    VLLMEngineConfig,
+    VLLMGenerationRequest,
+    VLLMSamplingParams,
 )
-
 from ray.llm._internal.serve.deployments.utils.node_initialization_utils import (
     InitializeNodeOutput,
     initialize_node as initialize_node_util,
@@ -54,11 +51,11 @@ from ray.llm._internal.serve.observability.metrics.utils import (
     ClockUnit,
     MsClock,
 )
+from ray.llm._internal.utils import try_import
 from ray.util import metrics
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-# TO DO ADD SGLang
 if TYPE_CHECKING:
     from vllm import SamplingParams as VLLMInternalSamplingParams
     from vllm.config import ModelConfig, VllmConfig
@@ -66,21 +63,7 @@ if TYPE_CHECKING:
     from vllm.engine.protocol import EngineClient
     from vllm.outputs import PoolingRequestOutput, RequestOutput
 
-# TO DO ADD SGLang MUST check each import 
-if TYPE_CHECKING:
-    from sglang import SamplingParams as SGLangInternalSamplingParams 
-    # python/sglang/srt/sampling/sampling_params.py#L22 OK
-    from sglang.config import ModelConfig, SGLangConfig
-    # ModelConfig: python/sglang/srt/configs/model_config.py
-    # SGLangConfig look into it
-    from sglang.engine.arg_utils import AsyncEngineArgs
-    # No AsyncEngineArgs missing class
-    from sglang.engine.protocol import EngineClient
-    # EngineClient missing 
-    from sglang.outputs import PoolingRequestOutput, RequestOutput    
-
 vllm = try_import("vllm")
-sglang = try_import("sglang") # add for sglang
 logger = get_logger(__name__)
 
 time_in_queue_histogram = metrics.Histogram(
@@ -115,16 +98,6 @@ def _get_async_engine_args(llm_config: LLMConfig) -> "AsyncEngineArgs":
             **engine_config.get_initialization_kwargs(),
         }
     )
-    # add one for SGLang TO DO
-    return sglang.engine.arg_utils.AsyncEngineArgs(
-        **{
-            "model": model,
-            "distributed_executor_backend": "ray",
-            "guided_decoding_backend": RAYLLM_GUIDED_DECODING_BACKEND,
-            "disable_log_stats": False,
-            **engine_config.get_initialization_kwargs(),
-        }
-    )
 
 
 def _get_vllm_engine_config(
@@ -134,15 +107,8 @@ def _get_vllm_engine_config(
     vllm_config = async_engine_args.create_engine_config()
     return async_engine_args, vllm_config
 
-def _get_sglang_engine_config(
-    llm_config: LLMConfig,
-) -> Tuple["AsyncEngineArgs", "SGLangConfig"]:
-    async_engine_args = _get_async_engine_args(llm_config)
-    sglang_config = async_engine_args.create_engine_config()
-    return async_engine_args, sglang_config    
 
-
-def _clear_current_platform_cache(): # can skip
+def _clear_current_platform_cache():
     """Clear the cache of the current platform.
 
     vllm current has an lru cache for getting device compatibility
@@ -158,7 +124,7 @@ def _clear_current_platform_cache(): # can skip
     https://github.com/vllm-project/vllm/issues/8402
     https://github.com/vllm-project/vllm/issues/7890
     """
-    from sglang.platforms import current_platform
+    from vllm.platforms import current_platform
 
     # TODO(seiji): remove this once https://github.com/vllm-project/vllm/pull/18979 is merged
     if (
@@ -176,10 +142,10 @@ def _clear_current_platform_cache(): # can skip
 
 class _EngineBackgroundProcess:
     def __init__(self, ipc_path, engine_args, engine_config):
-        from sglang.engine.multiprocessing.engine import MQLLMEngine # added where is this?
+        from vllm.engine.multiprocessing.engine import MQLLMEngine
 
         # Adapted from vllm.engine.multiprocessing.engine.MQLLMEngine.from_engine_args
-        sglang.plugins.load_general_plugins()
+        vllm.plugins.load_general_plugins()
 
         # Note (genesu): There is a bug in vllm 0.7.2 forced the use of uni processing
         # executor when world_size is 1. This is a bug in vllm 0.7.2 and
@@ -212,64 +178,64 @@ class _EngineBackgroundProcess:
         return self._error
 
 
-class SGLangEngine(LLMEngine):
+class VLLMEngine(LLMEngine):
     def __init__(
         self,
         llm_config: LLMConfig,
     ):
-        """Create a SGLang Engine class
+        """Create a vLLM Engine class
 
         Args:
             llm_config: The llm configuration for this engine
         """
         super().__init__(llm_config)
 
-        if sglang is None:
+        if vllm is None:
             raise ImportError(
-                "SGLang is not installed. Please install it with `pip install ray[llm]`."
+                "vLLM is not installed. Please install it with `pip install ray[llm]`."
             )
 
         # Pick a random port in P/D case.
         kv_transfer_config = llm_config.engine_kwargs.get("kv_transfer_config", None)
         if kv_transfer_config is not None:
-            if not sglang.envs.VLLM_USE_V1:
-                logger.warning("Ray Serve LLM only supports P/D with v1 SGLang engine.")
+            if not vllm.envs.VLLM_USE_V1:
+                logger.warning("Ray Serve LLM only supports P/D with v1 vLLM engine.")
             connector_type = getattr(kv_transfer_config, "kv_connector", "")
             if connector_type != "NixlConnector":
                 raise ValueError("Only NixlConnector is supported for kv transfer.")
             if (
-                "SGLANG_NIXL_SIDE_CHANNEL_PORT" not in sglang.envs.environment_variables
-                or "SGLANG_NIXL_SIDE_CHANNEL_HOST" not in sglang.envs.environment_variables
+                "VLLM_NIXL_SIDE_CHANNEL_PORT" not in vllm.envs.environment_variables
+                or "VLLM_NIXL_SIDE_CHANNEL_HOST" not in vllm.envs.environment_variables
             ):
                 raise ValueError(
-                    "This SGLang version does not support SGLANG_NIXL_SIDE_CHANNEL_PORT"
-                    "or SGLANG_NIXL_SIDE_CHANNEL_HOST environment variable. It's likely"
+                    "This vLLM version does not support VLLM_NIXL_SIDE_CHANNEL_PORT"
+                    "or VLLM_NIXL_SIDE_CHANNEL_HOST environment variable. It's likely"
                     "that you are using an older version of vLLM."
                 )
 
-            if not sglang.envs.is_set("SGLANG_NIXL_SIDE_CHANNEL_PORT"):
-                port: int = sglang.utils.get_open_port()
-                os.environ["SGLANG_NIXL_SIDE_CHANNEL_PORT"] = str(port)
-            if not sglang.envs.is_set("SGLANG_NIXL_SIDE_CHANNEL_HOST"):
-                os.environ["SGLANG_NIXL_SIDE_CHANNEL_HOST"] = sglang.utils.get_ip()
+            if not vllm.envs.is_set("VLLM_NIXL_SIDE_CHANNEL_PORT"):
+                port: int = vllm.utils.get_open_port()
+                os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(port)
+            if not vllm.envs.is_set("VLLM_NIXL_SIDE_CHANNEL_HOST"):
+                os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = vllm.utils.get_ip()
 
             # We need to overwrite the engine_id to make it unique across replicas.
             engine_id = getattr(kv_transfer_config, "engine_id", str(uuid.uuid4()))
-            host = sglang.envs.SGLANG_NIXL_SIDE_CHANNEL_HOST
-            port = sglang.envs.SGLANG_NIXL_SIDE_CHANNEL_PORT
+            host = vllm.envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+            port = vllm.envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             kv_transfer_config.engine_id = "-".join([engine_id, host, str(port)])
 
         assert isinstance(
             llm_config, LLMConfig
         ), f"Got invalid config {llm_config} of type {type(llm_config)}"
         self.llm_config = llm_config
-        self.engine_config = SGLANGMEngineConfig.from_llm_config(llm_config)
+        self.engine_config = VLLMEngineConfig.from_llm_config(llm_config)
 
-        self._stats = SGLANGEngineStatTracker()
+        self._stats = VLLMEngineStatTracker()
         self.running = False
         self.model_config: "ModelConfig" = None
         self.engine = None
-        self.sglang_config: "SGLangConfig" = None
+        self.vllm_config: "VllmConfig" = None
 
         # Chat template content format (openai or string)
         self._resolved_content_format = None
@@ -277,7 +243,7 @@ class SGLangEngine(LLMEngine):
         self._tokenizer = None
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-        self._atokenize = sglang.utils.make_async(
+        self._atokenize = vllm.utils.make_async(
             self._tokenize, executor=self._tokenizer_executor
         )
 
@@ -298,11 +264,11 @@ class SGLangEngine(LLMEngine):
         return encoded.input_ids
 
     async def start(self):
-        """Start the SGLang engine.
+        """Start the vLLM engine.
 
         If the engine is already running, do nothing.
         """
-        from sglang.entrypoints.chat_utils import (
+        from vllm.entrypoints.chat_utils import (
             resolve_chat_template_content_format as _resolve_chat_template_content_format,
         )
 
@@ -341,10 +307,10 @@ class SGLangEngine(LLMEngine):
             tokenizer=self._tokenizer,
         )
 
-        logger.info("Started SGLang engine.")
+        logger.info("Started vLLM engine.")
 
     async def _start_engine(self) -> "EngineClient":
-        from sglang import envs
+        from vllm import envs
 
         # Since vLLM 0.8.0, the logic to determine v0/v1 engine is as follows:
         # 1. If VLLM_USE_V1 is not set, then it tries to use v1 engine. However,
@@ -388,20 +354,32 @@ class SGLangEngine(LLMEngine):
         if self.engine_config.use_gpu:
             # Create engine config on a task with access to GPU,
             # as GPU capability may be queried.
-            ref = (
-                ray.remote(
-                    num_cpus=0,
-                    num_gpus=1,
-                    accelerator_type=self.llm_config.accelerator_type,
-                )(_get_vllm_engine_config)
-                .options(
-                    runtime_env=node_initialization.runtime_env,
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(
-                        placement_group=node_initialization.placement_group,
-                    ),
+            if self.llm_config.accelerator_type:
+                ref = (
+                    ray.remote(
+                        num_cpus=0,
+                        num_gpus=1,
+                        accelerator_type=self.llm_config.accelerator_type,
+                    )(_get_vllm_engine_config)
+                    .options(
+                        runtime_env=node_initialization.runtime_env,
+                        scheduling_strategy=PlacementGroupSchedulingStrategy(
+                            placement_group=node_initialization.placement_group,
+                        ),
+                    )
+                    .remote(self.llm_config)
                 )
-                .remote(self.llm_config)
-            )
+            else:
+                ref = (
+                    ray.remote(num_cpus=0, num_gpus=1)(_get_vllm_engine_config)
+                    .options(
+                        runtime_env=node_initialization.runtime_env,
+                        scheduling_strategy=PlacementGroupSchedulingStrategy(
+                            placement_group=node_initialization.placement_group,
+                        ),
+                    )
+                    .remote(self.llm_config)
+                )
             engine_args, engine_config = ray.get(ref)
         else:
             engine_args, engine_config = _get_vllm_engine_config(self.llm_config)
@@ -563,7 +541,7 @@ class SGLangEngine(LLMEngine):
         stream: bool,
         disk_lora_model: Optional[DiskMultiplexConfig] = None,
     ) -> GenerationRequest:
-        from sglang.entrypoints.chat_utils import (
+        from vllm.entrypoints.chat_utils import (
             apply_hf_chat_template as _apply_hf_chat_template,
             parse_chat_messages_futures,
         )
@@ -620,7 +598,6 @@ class SGLangEngine(LLMEngine):
             request_params["multi_modal_data"] = mm_data
 
         vllm_request = VLLMGenerationRequest(**request_params)
-        sglang_request = SGLANGGenerationRequest(**request_params) # TO DO
         return vllm_request
 
     async def generate(
@@ -646,17 +623,17 @@ class SGLangEngine(LLMEngine):
             )
 
         if request.prompt_token_ids is not None:
-            prompt = sglang.inputs.TokensPrompt(
+            prompt = vllm.inputs.TokensPrompt(
                 prompt_token_ids=request.prompt_token_ids,
                 multi_modal_data=request.multi_modal_data,
             )
         else:
-            prompt = sglang.inputs.TextPrompt(
+            prompt = vllm.inputs.TextPrompt(
                 prompt=request.prompt,
                 multi_modal_data=request.multi_modal_data,
             )
 
-        # Construct a results generator from SGLang
+        # Construct a results generator from vLLM
         results_generator: AsyncGenerator["RequestOutput", None] = self.engine.generate(
             prompt=prompt,
             sampling_params=self._parse_sampling_params(request.sampling_params),
