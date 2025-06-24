@@ -28,17 +28,17 @@ from ray.llm._internal.serve.configs.server_models import (
     Prompt,
 )
 from ray.llm._internal.serve.deployments.llm.llm_engine import LLMEngine
-from ray.llm._internal.serve.deployments.llm.vllm.vllm_engine_stats import (
+from ray.llm._internal.serve.deployments.llm.sglang.sglang_engine_stats import (
     ArgUsage,
-    VLLMEngineStatTracker,
+    SGLangEngineStatTracker,
     usage_counters,
 )
-from ray.llm._internal.serve.deployments.llm.vllm.vllm_models import (
-    KV_TRANSFER_PARAMS_KEY,
-    VLLMEmbeddingRequest,
-    VLLMEngineConfig,
-    VLLMGenerationRequest,
-    VLLMSamplingParams,
+from ray.llm._internal.serve.deployments.llm.sglang.sglang_models import (
+    # KV_TRANSFER_PARAMS_KEY,
+    SGLangEmbeddingRequest,
+    SGLangEngineConfig,
+    SGLangGenerationRequest,
+    SGLangSamplingParams,
 )
 from ray.llm._internal.serve.deployments.utils.node_initialization_utils import (
     InitializeNodeOutput,
@@ -57,18 +57,14 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
-    from sglang import SamplingParams as SGLangInternalSamplingParams 
-    # python/sglang/srt/sampling/sampling_params.py#L22 OK
-    from sglang.config import ModelConfig, SGLangConfig
-    # ModelConfig: python/sglang/srt/configs/model_config.py
-    # SGLangConfig look into it
-    from sglang.engine.arg_utils import AsyncEngineArgs
-    # No AsyncEngineArgs missing class
-    from sglang.engine.protocol import EngineClient
-    # EngineClient missing 
-    from sglang.outputs import PoolingRequestOutput, RequestOutput    
+    from vllm import SamplingParams as VLLMInternalSamplingParams
+    # from vllm.config import ModelConfig, VllmConfig
+    from sglang.srt.configs.model_config import ModelConfig
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.engine.protocol import EngineClient
+    from vllm.outputs import PoolingRequestOutput, RequestOutput
 
-vllm = try_import("vllm")
+vllm   = try_import("vllm")  # Keep it for func make_async()
 sglang = try_import("sglang")
 logger = get_logger(__name__)
 
@@ -183,65 +179,36 @@ class _EngineBackgroundProcess:
     def get_error(self):
         return self._error
 
-
-class VLLMEngine(LLMEngine):
+# Note: Ray has 2 LLMEngine class. One is from server_models.py for vLLM/SGLang enum. The other one is for LLM abstract class.
+class SGLangEngine(LLMEngine):
     def __init__(
         self,
         llm_config: LLMConfig,
     ):
-        """Create a vLLM Engine class
+        """Create a SGLang Engine class
 
         Args:
             llm_config: The llm configuration for this engine
         """
         super().__init__(llm_config)
 
-        if vllm is None:
+        if sglang is None:
             raise ImportError(
-                "vLLM is not installed. Please install it with `pip install ray[llm]`."
+                "SGLang is not installed. " # Please install it with `pip install ray[llm]`
             )
-
-        # Pick a random port in P/D case.
-        kv_transfer_config = llm_config.engine_kwargs.get("kv_transfer_config", None)
-        if kv_transfer_config is not None:
-            if not vllm.envs.VLLM_USE_V1:
-                logger.warning("Ray Serve LLM only supports P/D with v1 vLLM engine.")
-            connector_type = getattr(kv_transfer_config, "kv_connector", "")
-            if connector_type != "NixlConnector":
-                raise ValueError("Only NixlConnector is supported for kv transfer.")
-            if (
-                "VLLM_NIXL_SIDE_CHANNEL_PORT" not in vllm.envs.environment_variables
-                or "VLLM_NIXL_SIDE_CHANNEL_HOST" not in vllm.envs.environment_variables
-            ):
-                raise ValueError(
-                    "This vLLM version does not support VLLM_NIXL_SIDE_CHANNEL_PORT"
-                    "or VLLM_NIXL_SIDE_CHANNEL_HOST environment variable. It's likely"
-                    "that you are using an older version of vLLM."
-                )
-
-            if not vllm.envs.is_set("VLLM_NIXL_SIDE_CHANNEL_PORT"):
-                port: int = vllm.utils.get_open_port()
-                os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(port)
-            if not vllm.envs.is_set("VLLM_NIXL_SIDE_CHANNEL_HOST"):
-                os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = vllm.utils.get_ip()
-
-            # We need to overwrite the engine_id to make it unique across replicas.
-            engine_id = getattr(kv_transfer_config, "engine_id", str(uuid.uuid4()))
-            host = vllm.envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-            port = vllm.envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            kv_transfer_config.engine_id = "-".join([engine_id, host, str(port)])
 
         assert isinstance(
             llm_config, LLMConfig
         ), f"Got invalid config {llm_config} of type {type(llm_config)}"
         self.llm_config = llm_config
-        self.engine_config = VLLMEngineConfig.from_llm_config(llm_config)
+        self.engine_config = SGLangEngineConfig.from_llm_config(llm_config)
 
-        self._stats = VLLMEngineStatTracker()
+        self._stats = SGLangEngineStatTracker()
         self.running = False
         self.model_config: "ModelConfig" = None
         self.engine = None
-        self.vllm_config: "VllmConfig" = None
+        # self.vllm_config: "VllmConfig" = None # Does SGLang has this similar class?
+        self.vllm_config = None
 
         # Chat template content format (openai or string)
         self._resolved_content_format = None
@@ -596,22 +563,22 @@ class VLLMEngine(LLMEngine):
             "prompt": prompt_text,
             "prompt_token_ids": prompt_token_ids,
             "request_id": request_id,
-            "sampling_params": VLLMSamplingParams.from_prompt(prompt),
+            "sampling_params": SGLangSamplingParams.from_prompt(prompt),
             "disk_multiplex_config": disk_lora_model,
             "stream": stream,
         }
         if mm_data:
             request_params["multi_modal_data"] = mm_data
 
-        vllm_request = VLLMGenerationRequest(**request_params)
-        return vllm_request
+        sglang_request = SGLangGenerationRequest(**request_params)
+        return sglang_request
 
     async def generate(
         self, request: GenerationRequest
     ) -> AsyncGenerator[LLMRawResponse, None]:
         """Generate an LLMRawResponse stream
 
-        The vLLM generation request will be passed into vLLM, and the resulting output
+        The SGLang generation request will be passed into SGLang, and the resulting output
         will be wrapped in an LLMRawResponse and yielded back to the user.
 
         Error handling:
@@ -786,32 +753,32 @@ class VLLMEngine(LLMEngine):
             ).exception
 
     async def embed(
-        self, vllm_embedding_request: VLLMEmbeddingRequest
+        self, sglang_embedding_request: SGLangEmbeddingRequest
     ) -> Tuple[List[List[float]], int]:
         """Return (embeddings, num_prompt_tokens)"""
 
-        num_prompts = len(vllm_embedding_request.prompt)
+        num_prompts = len(sglang_embedding_request.prompt)
         if RAYLLM_ENABLE_REQUEST_PROMPT_LOGS:
             logger.info(
-                f"Encoding request {vllm_embedding_request.request_id} started. "
+                f"Encoding request {sglang_embedding_request.request_id} started. "
                 f"Num prompts: {num_prompts}"
             )
 
         generators: List[AsyncGenerator["PoolingRequestOutput", None]] = []
 
-        prompts = vllm_embedding_request.prompt
+        prompts = sglang_embedding_request.prompt
         if isinstance(prompts, str):
             prompts = [prompts]
 
         for i, prompt in enumerate(prompts):
-            request_id = f"{vllm_embedding_request.request_id}-{i}"
+            request_id = f"{sglang_embedding_request.request_id}-{i}"
             gen: AsyncGenerator["PoolingRequestOutput", None] = self.engine.encode(
                 prompt=vllm.inputs.TextPrompt(
                     prompt=prompt,
                 ),
                 pooling_params=vllm.pooling_params.PoolingParams(),
                 request_id=request_id,
-                lora_request=vllm_embedding_request.lora_request,  # type: ignore
+                lora_request=sglang_embedding_request.lora_request,  # type: ignore
             )
             generators.append(gen)
 
@@ -821,7 +788,7 @@ class VLLMEngine(LLMEngine):
         for gen in generators:
             async for result in gen:
                 embedding = result.outputs.embedding
-                if vllm_embedding_request.encoding_format == "base64":
+                if sglang_embedding_request.encoding_format == "base64":
                     embedding = floats_to_base64(embedding)
 
                 embedding_data.append(embedding)
@@ -840,7 +807,7 @@ class VLLMEngine(LLMEngine):
             raise e from None
 
     @staticmethod
-    def _collect_usage_metrics(sampling_params: VLLMSamplingParams) -> None:
+    def _collect_usage_metrics(sampling_params: SGLangSamplingParams) -> None:
         if sampling_params.best_of is not None:
             usage_counters[ArgUsage.BEST_OF].inc()
 
@@ -875,7 +842,7 @@ class VLLMEngine(LLMEngine):
             usage_counters[ArgUsage.LOGPROBS].inc()
 
     def _parse_sampling_params(
-        self, sampling_params: VLLMSamplingParams
+        self, sampling_params: SGLangSamplingParams
     ) -> "VLLMInternalSamplingParams":
         """Parse the vllm sampling parameters from the prompt.
         This function is used to parse the sampling parameters from the prompt.
