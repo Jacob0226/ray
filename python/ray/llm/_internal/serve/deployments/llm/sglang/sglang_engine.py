@@ -57,13 +57,19 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
-    from vllm import SamplingParams as VLLMInternalSamplingParams
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.engine.arg_utils import AsyncEngineArgs
-    from vllm.engine.protocol import EngineClient
-    from vllm.outputs import PoolingRequestOutput, RequestOutput
+    from sglang import SamplingParams as SGLangInternalSamplingParams 
+    # python/sglang/srt/sampling/sampling_params.py#L22 OK
+    from sglang.config import ModelConfig, SGLangConfig
+    # ModelConfig: python/sglang/srt/configs/model_config.py
+    # SGLangConfig look into it
+    from sglang.engine.arg_utils import AsyncEngineArgs
+    # No AsyncEngineArgs missing class
+    from sglang.engine.protocol import EngineClient
+    # EngineClient missing 
+    from sglang.outputs import PoolingRequestOutput, RequestOutput    
 
 vllm = try_import("vllm")
+sglang = try_import("sglang")
 logger = get_logger(__name__)
 
 time_in_queue_histogram = metrics.Histogram(
