@@ -28,9 +28,9 @@ from ray.llm._internal.serve.configs.server_models import (
     Prompt,
 )
 from ray.llm._internal.serve.deployments.llm.llm_engine import LLMEngine
-from ray.llm._internal.serve.deployments.llm.vllm.vllm_engine_stats import (
+from ray.llm._internal.serve.deployments.llm.sglang.sglang_engine_stats import (
     ArgUsage,
-    VLLMEngineStatTracker,
+    SGLANGEngineStatTracker,
     usage_counters,
 )
 
