@@ -6,11 +6,85 @@ from sglang.engine.metrics import (
     _RayCounterWrapper,
     _RayGaugeWrapper,
     _RayHistogramWrapper,
-) # TO DO HOW to change this?
-from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.loggers import StatLoggerBase, build_1_2_5_buckets
+) 
+# from vllm.v1.engine import FinishReason DONE by Colin
+# replace from vllm.v1.engine import FinishReason to SGLnag version
+# by inline code
+import enum
+FINISH_REASON_STRINGS = ("stop", "length", "abort")
+class FinishReason(enum.IntEnum):
+    """
+    Reason a request finished - stop, length, or abort.
+
+    Int rather than Str for more compact serialization.
+
+    stop - a stop string was emitted
+    length - max_tokens was consumed, or max_model_len was reached
+    abort - aborted for another reason
+
+    """
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+
+    def __str__(self):
+        return FINISH_REASON_STRINGS[self.value]
+
+
+# from vllm.v1.metrics.loggers import StatLoggerBase, build_1_2_5_buckets Done by Colin
+class StatLoggerBase(ABC):
+    """Interface for logging metrics.
+
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
+    """
+
+    @abstractmethod
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        ...
+
+    @abstractmethod
+    def record(self, scheduler_stats: Optional[SchedulerStats],
+               iteration_stats: Optional[IterationStats]):
+        ...
+
+    @abstractmethod
+    def log_engine_initialized(self):
+        ...
+
+    def log(self):  # noqa
+        pass
+
+def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by
+    mantissa values until the value exceeds the specified maximum.
+
+    """
+    exponent = 0
+    buckets: list[int] = []
+    while True:
+        for m in mantissa_lst:
+            value = m * 10**exponent
+            if value <= max_value:
+                buckets.append(value)
+            else:
+                return buckets
+        exponent += 1
+
+
+def build_1_2_5_buckets(max_value: int) -> list[int]:
+    """
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    return build_buckets([1, 2, 5], max_value)
+    
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+# I think SGL can use vllm.v1 implementations
 
 from ray.util import metrics as ray_metrics
 
