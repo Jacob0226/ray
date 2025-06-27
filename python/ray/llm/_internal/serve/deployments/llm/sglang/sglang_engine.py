@@ -328,6 +328,7 @@ class SGLangEngine(LLMEngine):
         #    experimental features (such as launching vLLM on a non-main thread).
         # 3. If VLLM_USE_V1 is set to 0, force using v0 engine.
         # In Ray Serve LLM, we forbid case 1 because we have to know exactly which engine is used.
+        ''' by pass vllm V0 case
         if not envs.is_set("VLLM_USE_V1"):
             logger.warning(
                 "VLLM_USE_V1 environment variable is not set, using vLLM v0 as default. "
@@ -340,10 +341,10 @@ class SGLangEngine(LLMEngine):
                 raise ValueError("V1 vLLM Engine is required to log engine metrics")
 
             return await self._start_engine_v0()
-
+        '''
         return await self._start_engine_v1()
 
-    async def _prepare_engine_config(self, use_v1: bool):
+    async def _prepare_engine_config(self):
         """
         Prepare the engine config to start the engine.
 
@@ -388,8 +389,8 @@ class SGLangEngine(LLMEngine):
                     .remote(self.llm_config)
                 )
             engine_args, engine_config = ray.get(ref)
-        else:
-            engine_args, engine_config = _get_vllm_engine_config(self.llm_config)
+        # else:
+        #     engine_args, engine_config = _get_vllm_engine_config(self.llm_config)
 
         # Note (genesu): vllm_config is used to extract the scheduler config for
         # computing the correct prompt limit.
@@ -407,7 +408,7 @@ class SGLangEngine(LLMEngine):
             engine_args,
             engine_config,
             node_initialization,
-        ) = await self._prepare_engine_config(use_v1=True)
+        ) = await self._prepare_engine_config()
 
         return self._start_async_llm_engine(
             engine_args,
@@ -415,7 +416,7 @@ class SGLangEngine(LLMEngine):
             node_initialization.placement_group,
             use_v1=True,
         )
-
+    ''' 
     async def _start_engine_v0(self) -> "EngineClient":
         from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
@@ -441,7 +442,8 @@ class SGLangEngine(LLMEngine):
         return await self._start_mq_engine(
             engine_args, engine_config, node_initialization.placement_group
         )
-
+    '''
+    '''
     async def _start_mq_engine(
         self,
         engine_args: "AsyncEngineArgs",
@@ -505,6 +507,7 @@ class SGLangEngine(LLMEngine):
         logger.info("[STATUS] Server is ready.")
 
         return engine_client
+    '''
 
     def _start_async_llm_engine(
         self,
