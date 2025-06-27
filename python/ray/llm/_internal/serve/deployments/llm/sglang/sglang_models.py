@@ -179,6 +179,7 @@ class SGLangEngineConfig(BaseModelExtended):
             GPUType.NVIDIA_H20.value,
             GPUType.NVIDIA_A100_40G.value,
             GPUType.NVIDIA_A100_80G.value,
+            GPUType.AMD_MI300X.value,
         )
 
     def get_or_create_pg(self) -> PlacementGroup:
