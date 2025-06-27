@@ -75,7 +75,7 @@ sglang = try_import("sglang")
 logger = get_logger(__name__)
 
 time_in_queue_histogram = metrics.Histogram(
-    "vllm_engine_stats_time_in_queue_ms",
+    "sglang_engine_stats_time_in_queue_ms",
     "Time a request spends in the queue first forward pass not included (ms).",
     boundaries=LONG_RANGE_LATENCY_HISTOGRAM_BUCKETS_MS,
 )
