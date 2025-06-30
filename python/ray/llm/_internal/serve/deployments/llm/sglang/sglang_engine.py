@@ -250,6 +250,8 @@ class SGLangEngine(LLMEngine):
             logger.info("Skipping engine restart because the engine is already running")
             return
 
+        logger.info(f"[DEBUG] self.llm_config={self.llm_config}")
+
         self.engine = await self._start_engine()
         self.running = True
         self.model_config = await self.engine.get_model_config()
@@ -283,31 +285,17 @@ class SGLangEngine(LLMEngine):
         logger.info("Started vLLM engine.")
 
     async def _start_engine(self) -> "EngineClient":
-        from vllm import envs
+        
+        node_initialization = await self.initialize_node(self.llm_config)       
 
-        # Since vLLM 0.8.0, the logic to determine v0/v1 engine is as follows:
-        # 1. If VLLM_USE_V1 is not set, then it tries to use v1 engine. However,
-        #    if any feature specified in the engine config is not supported, then
-        #    it falls back to v0. Note that launching vLLM on a non-main thread
-        #    is an experimental feature, so vLLM will fall back to v0 in this case.
-        # 2. If VLLM_USE_V1 is set to 1, then it will use v1 engine even with
-        #    experimental features (such as launching vLLM on a non-main thread).
-        # 3. If VLLM_USE_V1 is set to 0, force using v0 engine.
-        # In Ray Serve LLM, we forbid case 1 because we have to know exactly which engine is used.
-        if not envs.is_set("VLLM_USE_V1"):
-            logger.warning(
-                "VLLM_USE_V1 environment variable is not set, using vLLM v0 as default. "
-                "Later we may switch default to use v1 once vLLM v1 is mature."
-            )
-            envs.set_vllm_use_v1(False)
+        # ToDo: Convert self.llm_config (LLMConfig) into SGLang args
 
-        if not envs.VLLM_USE_V1:
-            if self.llm_config.log_engine_metrics:
-                raise ValueError("V1 vLLM Engine is required to log engine metrics")
-
-            return await self._start_engine_v0()
-
-        return await self._start_engine_v1()
+        # from sglang.srt.entrypoints.engine import Engine
+        # return await Engine(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct") 
+        from sglang.lang.backend.runtime_endpoint import Runtime
+        return await Runtime(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", tp_size=8)
+        # return await Engine(self.llm_config)
+    
 
     async def _prepare_engine_config(self, use_v1: bool):
         """

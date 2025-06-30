@@ -154,7 +154,7 @@ class ModelLoadingConfig(BaseModelExtended):
     )
 
 
-EngineConfigType = Union[None, "VLLMEngineConfig"]  # noqa: F821
+EngineConfigType = Union[None, "VLLMEngineConfig", "SGLangEngineConfig"]  # noqa: F821
 
 
 class LLMConfig(BaseModelExtended):
