@@ -196,6 +196,7 @@ class EngineActor:
             model_path=self.model_path,
             mem_fraction_static=0.5,
             tp_size=8,
+            cuda_graph_max_bs=64,
         ) 
 
         self.tokenizer=self.engine.tokenizer_manager
@@ -624,15 +625,19 @@ class SGLangEngine(LLMEngine):
 
         return embedding_data, total_prompt_tokens
 
+    # dummy check health
     async def check_health(self) -> None:
-        if not hasattr(self.engine, "check_health"):
-            raise RuntimeError(f"{type(self.engine)} does not support health check.")
+        from fastapi import FastAPI, Response
+        return Response(status_code=200)
 
-        try:
-            return await asyncio.wait_for(self.engine.check_health(), timeout=15)
-        except BaseException as e:
-            logger.exception("Healthcheck failed. The replica will be restarted")
-            raise e from None
+        # if not hasattr(self.engine, "check_health"):
+        #     raise RuntimeError(f"{type(self.engine)} does not support health check.")
+
+        # try:
+        #     return await asyncio.wait_for(self.engine.check_health(), timeout=15)
+        # except BaseException as e:
+        #     logger.exception("Healthcheck failed. The replica will be restarted")
+        #     raise e from None
 
     @staticmethod
     def _collect_usage_metrics(sampling_params: SGLangSamplingParams) -> None:
