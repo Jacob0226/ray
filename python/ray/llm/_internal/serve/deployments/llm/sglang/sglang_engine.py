@@ -193,7 +193,7 @@ class EngineActor:
     async def start(self):
         from sglang.srt.entrypoints.engine import Engine
         self.engine = Engine(
-            model_path=self.model_path,
+            model_path=self.model_path, # ToDo
             mem_fraction_static=0.5,
             tp_size=8,
             cuda_graph_max_bs=64,
@@ -201,10 +201,17 @@ class EngineActor:
 
         self.tokenizer=self.engine.tokenizer_manager
 
-
-
-    async def generate(self, prompt: str) -> str:
-        return await self.engine.generate(prompt)
+    async def generate(self, prompt: str, sampling_params:SGLangSamplingParams, request_id:str
+        ) -> AsyncGenerator[dict, None]:
+        # return await self.engine.async_generate([prompt], stream=True)
+        return await  self.engine.async_generate(
+            prompt=prompt,
+            # input_ids=input_ids,
+            # sampling_params=sampling_params,
+            # request_id=request_id, 
+            # stream=stream, 
+            # image_data=image_data,
+        )
 
 
 
@@ -242,7 +249,8 @@ class SGLangEngine(LLMEngine):
         # Chat template content format (openai or string)
         self._resolved_content_format = None
         # Also need local instance of the tokenizer to manage prompt formatting.
-        self._tokenizer = None
+        from transformers import AutoTokenizer
+        self._tokenizer = AutoTokenizer.from_pretrained("/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
         self._atokenize = vllm.utils.make_async(
@@ -259,7 +267,7 @@ class SGLangEngine(LLMEngine):
         """
         return await initialize_node_util(llm_config)
 
-    def _tokenize(
+    def _tokenize( # ToDo 
         self, prompt_text: str, add_special_tokens: bool = False
     ) -> List[int]:
         encoded = self._tokenizer(prompt_text, add_special_tokens=add_special_tokens)
@@ -329,11 +337,8 @@ class SGLangEngine(LLMEngine):
             runtime_env=runtime_env
         ).remote(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
         await engine_actor.start.remote()
-        return engine_actor
 
-        # return await Engine(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct") 
-        # from sglang.lang.backend.runtime_endpoint import Runtime
-        # return await Runtime(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", tp_size=8)
+        return engine_actor
 
 
     async def prepare_request(
@@ -386,7 +391,10 @@ class SGLangEngine(LLMEngine):
         else:
             prompt_text = prompt.prompt
 
+        print(f"[DEBUG] prompt_text={prompt_text}", flush=True)
+        # Pass to SGLang tokenizer
         prompt_token_ids = await self._atokenize(prompt_text)
+        print(f"[DEBUG] prompt_token_ids={prompt_token_ids}", flush=True)
 
         request_params = {
             "prompt": prompt_text,
@@ -423,131 +431,151 @@ class SGLangEngine(LLMEngine):
             logger.info(
                 f"Request {request.request_id} started. " f"Prompt: {request.prompt}"
             )
+        
 
-        if request.prompt_token_ids is not None:
-            prompt = vllm.inputs.TokensPrompt(
-                prompt_token_ids=request.prompt_token_ids,
-                multi_modal_data=request.multi_modal_data,
-            )
-        else:
-            prompt = vllm.inputs.TextPrompt(
-                prompt=request.prompt,
-                multi_modal_data=request.multi_modal_data,
-            )
+        # if request.prompt_token_ids is not None:
+        #     prompt = vllm.inputs.TokensPrompt(
+        #         prompt_token_ids=request.prompt_token_ids,
+        #         multi_modal_data=request.multi_modal_data,
+        #     )
+        # else:
+        #     prompt = vllm.inputs.TextPrompt(
+        #         prompt=request.prompt,
+        #         multi_modal_data=request.multi_modal_data,
+        #     )
 
-        # Construct a results generator from vLLM
-        results_generator: AsyncGenerator["RequestOutput", None] = self.engine.generate(
-            prompt=prompt,
+        # Construct a results generator from SGLang
+        print(f"[DEBUG] request={request}")
+        results_generator: AsyncGenerator["RequestOutput", None] = await self.engine.generate.remote(
+            prompt=request.prompt,
             sampling_params=self._parse_sampling_params(request.sampling_params),
             request_id=request.request_id,
-            lora_request=request.lora_request,  # type: ignore
+            # lora_request=request.lora_request,  # Skip for now
         )
-
-        # Loop over the results
-        num_text_returned = 0
-        all_tokens_collected = 0
+        print(f"[DEBUG] results_generator={results_generator}")
         clock = MsClock(unit=ClockUnit.s)
-        log_probs_idx = 0
-        finish_reason = None
-        num_input_tokens = 0
-        try:
-            start = time.perf_counter()
-            request_output = None
-            async for request_output in self._stats.auto_track(results_generator):
-                # TODO(tchordia): handle more than one output
-                assert (
-                    len(request_output.outputs) == 1
-                ), "Received more than 1 output from vllm, aborting"
+        
+        meta_info = results_generator['meta_info']
+        yield LLMRawResponse(
+                generated_text=results_generator['text'],
+                num_generated_tokens=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
+                # logprobs=log_probs,
+                num_generated_tokens_batch=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
+                num_input_tokens=meta_info['prompt_tokens'],
+                num_input_tokens_batch=meta_info['prompt_tokens'],
+                preprocessing_time=0,
+                generation_time=clock.reset_interval(),
+                finish_reason=meta_info['finish_reason']['type'],
+                metadata=meta_info,
+            )
 
-                output = request_output.outputs[0]
-                text_output = output.text[num_text_returned:]
-                num_text_returned += len(text_output)
-                num_input_tokens = len(request_output.prompt_token_ids)
-                tokens_collected = len(output.token_ids) - all_tokens_collected
-                all_tokens_collected += tokens_collected
-                finish_reason = FinishReason.from_vllm_finish_reason(
-                    output.finish_reason
-                )
 
-                self._handle_input_too_long(request_output, finish_reason)
+        # # Loop over the results
+        # num_text_returned = 0
+        # all_tokens_collected = 0
+        # clock = MsClock(unit=ClockUnit.s)
+        # log_probs_idx = 0
+        # finish_reason = None
+        # num_input_tokens = 0
+        # try:
+        #     print(f"[DEBUG] wait for server response")
+        #     start = time.perf_counter()
+        #     request_output = None
+        #     async for request_output in self._stats.auto_track(results_generator):
+        #         # TODO(tchordia): handle more than one output
+        #         assert (
+        #             len(request_output.outputs) == 1
+        #         ), "Received more than 1 output from sglang, aborting"
 
-                log_probs, log_probs_idx = self._extract_logprobs(
-                    output,
-                    log_probs_idx,
-                    request.sampling_params.top_logprobs,
-                )
-                internal_metadata = {}
-                if getattr(request_output, "kv_transfer_params", None) is not None:
-                    internal_metadata[
-                        KV_TRANSFER_PARAMS_KEY
-                    ] = request_output.kv_transfer_params
-                yield LLMRawResponse(
-                    generated_text=text_output,
-                    num_generated_tokens=tokens_collected,
-                    logprobs=log_probs,
-                    num_generated_tokens_batch=tokens_collected,
-                    num_input_tokens=num_input_tokens,
-                    num_input_tokens_batch=num_input_tokens,
-                    preprocessing_time=0,
-                    generation_time=clock.reset_interval(),
-                    finish_reason=finish_reason,
-                    metadata=internal_metadata,
-                )
+        #         output = request_output.outputs[0]
+        #         text_output = output.text[num_text_returned:]
+        #         num_text_returned += len(text_output)
+        #         num_input_tokens = len(request_output.prompt_token_ids)
+        #         tokens_collected = len(output.token_ids) - all_tokens_collected
+        #         all_tokens_collected += tokens_collected
+        #         finish_reason = FinishReason.from_vllm_finish_reason(
+        #             output.finish_reason
+        #         )
 
-            if request_output is not None:
-                total_request_time = time.perf_counter() - start
-                if request_output.metrics is None:
-                    # vLLM V1 metrics are not included in the request output yet.
-                    queue_time = "N/A"
-                    generation_time_str = "N/A"
-                    tokens_s = "N/A"
-                    generated_tokens_s = "N/A"
-                else:
-                    time_in_queue_histogram.observe(
-                        request_output.metrics.time_in_queue
-                    )
-                    queue_time = f"{request_output.metrics.time_in_queue}s"
-                    generation_time = (
-                        total_request_time - request_output.metrics.time_in_queue
-                    )
-                    generation_time_str = f"{generation_time}s"
-                    tokens_s = (
-                        num_input_tokens + all_tokens_collected
-                    ) / generation_time
-                    generated_tokens_s = all_tokens_collected / generation_time
+        #         self._handle_input_too_long(request_output, finish_reason)
 
-                logger.info(
-                    f"Request {request.request_id} finished ({finish_reason}). "
-                    f"Total time: {total_request_time}s, "
-                    f"Queue time: {queue_time}, "
-                    f"Generation+async time: {generation_time_str}, "
-                    f"Input tokens: {num_input_tokens}, "
-                    f"Generated tokens: {all_tokens_collected}, "
-                    f"tokens/s: {tokens_s}, "
-                    f"generated tokens/s: {generated_tokens_s}."
-                )
-            else:
-                logger.warning(
-                    f"Request {request.request_id} "
-                    "finished without any output. "
-                    f"Input tokens: {num_input_tokens}."
-                )
-        except ValueError as e:
-            error_args = e.args
-            if len(error_args) == 3 and "Input too long." == error_args[0]:
-                _, input_length, max_input_length = error_args
-                raise InputTooLong(input_length, max_input_length).exception from None
-            elif len(error_args) == 1 and V1_TOO_LONG_PATTERN.match(error_args[0]):
-                parsed_error = V1_TOO_LONG_PATTERN.match(error_args[0])
-                raise InputTooLong(
-                    int(parsed_error[1]), int(parsed_error[2])
-                ).exception from None
-            else:
-                raise e from None
-        finally:
-            # Ensure that we cancel on the engine once we have exited the streaming
-            # phase
-            await self.engine.abort(request.request_id)
+        #         log_probs, log_probs_idx = self._extract_logprobs(
+        #             output,
+        #             log_probs_idx,
+        #             request.sampling_params.top_logprobs,
+        #         )
+        #         internal_metadata = {}
+        #         if getattr(request_output, "kv_transfer_params", None) is not None:
+        #             internal_metadata[
+        #                 KV_TRANSFER_PARAMS_KEY
+        #             ] = request_output.kv_transfer_params
+        #         yield LLMRawResponse(
+        #             generated_text=text_output,
+        #             num_generated_tokens=tokens_collected,
+        #             logprobs=log_probs,
+        #             num_generated_tokens_batch=tokens_collected,
+        #             num_input_tokens=num_input_tokens,
+        #             num_input_tokens_batch=num_input_tokens,
+        #             preprocessing_time=0,
+        #             generation_time=clock.reset_interval(),
+        #             finish_reason=finish_reason,
+        #             metadata=internal_metadata,
+        #         )
+
+        #     if request_output is not None:
+        #         total_request_time = time.perf_counter() - start
+        #         if request_output.metrics is None:
+        #             # vLLM V1 metrics are not included in the request output yet.
+        #             queue_time = "N/A"
+        #             generation_time_str = "N/A"
+        #             tokens_s = "N/A"
+        #             generated_tokens_s = "N/A"
+        #         else:
+        #             time_in_queue_histogram.observe(
+        #                 request_output.metrics.time_in_queue
+        #             )
+        #             queue_time = f"{request_output.metrics.time_in_queue}s"
+        #             generation_time = (
+        #                 total_request_time - request_output.metrics.time_in_queue
+        #             )
+        #             generation_time_str = f"{generation_time}s"
+        #             tokens_s = (
+        #                 num_input_tokens + all_tokens_collected
+        #             ) / generation_time
+        #             generated_tokens_s = all_tokens_collected / generation_time
+
+        #         logger.info(
+        #             f"Request {request.request_id} finished ({finish_reason}). "
+        #             f"Total time: {total_request_time}s, "
+        #             f"Queue time: {queue_time}, "
+        #             f"Generation+async time: {generation_time_str}, "
+        #             f"Input tokens: {num_input_tokens}, "
+        #             f"Generated tokens: {all_tokens_collected}, "
+        #             f"tokens/s: {tokens_s}, "
+        #             f"generated tokens/s: {generated_tokens_s}."
+        #         )
+        #     else:
+        #         logger.warning(
+        #             f"Request {request.request_id} "
+        #             "finished without any output. "
+        #             f"Input tokens: {num_input_tokens}."
+        #         )
+        # except ValueError as e:
+        #     error_args = e.args
+        #     if len(error_args) == 3 and "Input too long." == error_args[0]:
+        #         _, input_length, max_input_length = error_args
+        #         raise InputTooLong(input_length, max_input_length).exception from None
+        #     elif len(error_args) == 1 and V1_TOO_LONG_PATTERN.match(error_args[0]):
+        #         parsed_error = V1_TOO_LONG_PATTERN.match(error_args[0])
+        #         raise InputTooLong(
+        #             int(parsed_error[1]), int(parsed_error[2])
+        #         ).exception from None
+        #     else:
+        #         raise e from None
+        # finally:
+        #     # Ensure that we cancel on the engine once we have exited the streaming
+        #     # phase
+        #     await self.engine.abort(request.request_id)
 
     def _get_prompt_limit(self) -> int:
         """Helper to get the prompt limit from scheduler config
@@ -689,7 +717,7 @@ class SGLangEngine(LLMEngine):
         try:
             if self.model_config is None:
                 raise RuntimeError(
-                    "VLLMEngine.model_config not set. Maybe VLLMEngine.start() was not called?"
+                    "SGLangEngine.model_config not set. Maybe SGLangEngine.start() was not called?"
                 )
 
             log_probs = None
@@ -716,7 +744,8 @@ class SGLangEngine(LLMEngine):
                     raise ValueError(
                         "if top_logprobs is specified, logprobs must be set to `True`"
                     )
-
+                    
+            print(f"[DEBUG] self.model_config={self.model_config}", flush=True)
             kwargs = dict(
                 n=1,
                 best_of=sampling_params.best_of,
@@ -729,8 +758,7 @@ class SGLangEngine(LLMEngine):
                 stop=sampling_params.stop,
                 stop_token_ids=sampling_params.stop_tokens,
                 ignore_eos=False,
-                # vLLM will cancel internally if input+output>max_tokens
-                max_tokens=self.model_config.max_model_len,
+                # max_tokens=self.model_config.context_length, # ToDo: get context_length from ModelConfig
                 logprobs=log_probs,
             )
             if sampling_params.presence_penalty is not None:
