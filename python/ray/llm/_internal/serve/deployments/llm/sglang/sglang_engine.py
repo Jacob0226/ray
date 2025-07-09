@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 from concurrent.futures.thread import ThreadPoolExecutor
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Tuple
+from typing import TYPE_CHECKING, AsyncIterator, AsyncGenerator, List, Optional, Tuple, Union, Dict
 
 import ray
 from ray.llm._internal.serve.configs.constants import (
@@ -201,17 +201,19 @@ class EngineActor:
 
         self.tokenizer=self.engine.tokenizer_manager
 
-    async def generate(self, prompt: str, sampling_params:SGLangSamplingParams, request_id:str
-        ) -> AsyncGenerator[dict, None]:
-        # return await self.engine.async_generate([prompt], stream=True)
-        return await  self.engine.async_generate(
-            prompt=prompt,
-            # input_ids=input_ids,
-            # sampling_params=sampling_params,
-            # request_id=request_id, 
-            # stream=stream, 
+    async def generate(self, 
+        request: GenerationRequest, 
+        sampling_params: dict, 
+        ) -> Union[Dict, AsyncIterator[Dict]]: # AsyncGenerator[dict, None]: 
+        generated_output = await self.engine.async_generate(
+            prompt=request.prompt,
+            input_ids=request.prompt_token_ids,
+            sampling_params=sampling_params,
+            stream=request.stream, 
             # image_data=image_data,
         )
+        print(f"[DEBUG] [remote] generated_output={generated_output}", flush=True)
+        return generated_output
 
 
 
@@ -446,17 +448,18 @@ class SGLangEngine(LLMEngine):
 
         # Construct a results generator from SGLang
         print(f"[DEBUG] request={request}")
-        results_generator: AsyncGenerator["RequestOutput", None] = await self.engine.generate.remote(
-            prompt=request.prompt,
-            sampling_params=self._parse_sampling_params(request.sampling_params),
-            request_id=request.request_id,
-            # lora_request=request.lora_request,  # Skip for now
-        )
-        print(f"[DEBUG] results_generator={results_generator}")
-        clock = MsClock(unit=ClockUnit.s)
+        sampling_params_dict=self._parse_sampling_params(request.sampling_params)
+        print(f"[DEBUG] sampling_params_dict={sampling_params_dict}")
         
-        meta_info = results_generator['meta_info']
-        yield LLMRawResponse(
+        if request.stream == False:
+            results_generator: Union[Dict, AsyncIterator[Dict]] = await self.engine.generate.remote(
+                request=request,
+                sampling_params=sampling_params_dict,
+                # lora_request=request.lora_request,  # Skip for now
+            )
+            meta_info = results_generator['meta_info']
+            clock = MsClock(unit=ClockUnit.s)
+            yield LLMRawResponse(
                 generated_text=results_generator['text'],
                 num_generated_tokens=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
                 # logprobs=log_probs,
@@ -468,6 +471,34 @@ class SGLangEngine(LLMEngine):
                 finish_reason=meta_info['finish_reason']['type'],
                 metadata=meta_info,
             )
+        else:
+            object_ref: Union[Dict, AsyncGenerator[Dict]] = self.engine.generate.remote(
+                request=request,
+                sampling_params=sampling_params_dict,
+                # lora_request=request.lora_request,  # Skip for now
+            )
+            results_generator = await object_ref
+
+            async for item in results_generator:
+                yield LLMRawResponse(
+                    generated_text="Test"
+                )
+                # print(f"[DEBUG] request_output={request_output}", flush=True)
+       
+        
+        # meta_info = results_generator['meta_info']
+        # yield LLMRawResponse(
+        #         generated_text=results_generator['text'],
+        #         num_generated_tokens=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
+        #         # logprobs=log_probs,
+        #         num_generated_tokens_batch=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
+        #         num_input_tokens=meta_info['prompt_tokens'],
+        #         num_input_tokens_batch=meta_info['prompt_tokens'],
+        #         preprocessing_time=0,
+        #         generation_time=clock.reset_interval(),
+        #         finish_reason=meta_info['finish_reason']['type'],
+        #         metadata=meta_info,
+        #     )
 
 
         # # Loop over the results
@@ -697,58 +728,58 @@ class SGLangEngine(LLMEngine):
             usage_counters[ArgUsage.STOP].inc()
 
         if sampling_params.max_tokens is not None:
-            usage_counters[ArgUsage.MAX_TOKENS].inc()
+            usage_counters[ArgUsage.MAX_TOKENS].inc() # ToDo: MAX_TOKENS -> MAX__NEW_TOKENS
 
         if sampling_params.logprobs is not None:
             usage_counters[ArgUsage.LOGPROBS].inc()
 
+    # check keyword from sglang/python/sglang/srt/sampling/sampling_params.py
     def _parse_sampling_params(
         self, sampling_params: SGLangSamplingParams
-    ) -> "VLLMInternalSamplingParams":
-        """Parse the vllm sampling parameters from the prompt.
+    ) -> dict:
+        """Parse the sampling parameters from the prompt.
         This function is used to parse the sampling parameters from the prompt.
         It also collects the usage metrics for the sampling parameters.
         Args:
             sampling_params: The sampling parameters defined in ray.serve.llm.
         Returns:
-            vllm.SamplingParams, The parsed sampling parameters.
+            dict, The parsed sampling parameters.
         """
         self._collect_usage_metrics(sampling_params)
         try:
-            if self.model_config is None:
-                raise RuntimeError(
-                    "SGLangEngine.model_config not set. Maybe SGLangEngine.start() was not called?"
-                )
+            # if self.model_config is None:
+            #     raise RuntimeError(
+            #         "SGLangEngine.model_config not set. Maybe SGLangEngine.start() was not called?"
+            #     )
 
-            log_probs = None
-            if sampling_params.logprobs:
-                max_logprobs = getattr(self.model_config, "max_logprobs", 0)
-                max_logprobs = min(MAX_NUM_TOPLOGPROBS_ALLOWED, max_logprobs)
-                if max_logprobs == 0:
-                    raise ValueError("This model doesn't support outputting logprobs.")
-                if sampling_params.top_logprobs:
-                    if not (
-                        MIN_NUM_TOPLOGPROBS_ALLOWED
-                        <= sampling_params.top_logprobs
-                        <= max_logprobs
-                    ):
-                        raise ValueError(
-                            f"top_logprobs must be between {MIN_NUM_TOPLOGPROBS_ALLOWED} "
-                            f"and {max_logprobs}. Got {sampling_params.top_logprobs}."
-                        )
-                    log_probs = sampling_params.top_logprobs
-                else:
-                    log_probs = 1
-            else:
-                if sampling_params.top_logprobs:
-                    raise ValueError(
-                        "if top_logprobs is specified, logprobs must be set to `True`"
-                    )
+            # log_probs = None
+            # if sampling_params.logprobs:
+            #     max_logprobs = getattr(self.model_config, "max_logprobs", 0)
+            #     max_logprobs = min(MAX_NUM_TOPLOGPROBS_ALLOWED, max_logprobs)
+            #     if max_logprobs == 0:
+            #         raise ValueError("This model doesn't support outputting logprobs.")
+            #     if sampling_params.top_logprobs:
+            #         if not (
+            #             MIN_NUM_TOPLOGPROBS_ALLOWED
+            #             <= sampling_params.top_logprobs
+            #             <= max_logprobs
+            #         ):
+            #             raise ValueError(
+            #                 f"top_logprobs must be between {MIN_NUM_TOPLOGPROBS_ALLOWED} "
+            #                 f"and {max_logprobs}. Got {sampling_params.top_logprobs}."
+            #             )
+            #         log_probs = sampling_params.top_logprobs
+            #     else:
+            #         log_probs = 1
+            # else:
+            #     if sampling_params.top_logprobs:
+            #         raise ValueError(
+            #             "if top_logprobs is specified, logprobs must be set to `True`"
+            #         )
                     
             print(f"[DEBUG] self.model_config={self.model_config}", flush=True)
             kwargs = dict(
                 n=1,
-                best_of=sampling_params.best_of,
                 presence_penalty=0.0,
                 frequency_penalty=0.0,
                 repetition_penalty=1.0,
@@ -758,8 +789,7 @@ class SGLangEngine(LLMEngine):
                 stop=sampling_params.stop,
                 stop_token_ids=sampling_params.stop_tokens,
                 ignore_eos=False,
-                # max_tokens=self.model_config.context_length, # ToDo: get context_length from ModelConfig
-                logprobs=log_probs,
+                max_new_tokens=sampling_params.max_new_tokens,
             )
             if sampling_params.presence_penalty is not None:
                 kwargs["presence_penalty"] = sampling_params.presence_penalty
@@ -776,25 +806,13 @@ class SGLangEngine(LLMEngine):
             if sampling_params.ignore_eos is not None:
                 kwargs["ignore_eos"] = sampling_params.ignore_eos
             if sampling_params.max_tokens is not None:
-                kwargs["max_tokens"] = sampling_params.max_tokens
-            # If we set it to None, vLLM will throw an exception
-            # as that is not the default value. Omitting it
-            # will allow vLLM to generate a new seed internally,
-            # as expected.
-            if sampling_params.seed is not None:
-                kwargs["seed"] = sampling_params.seed
-            if sampling_params.response_format is not None:
-                kwargs[
-                    "guided_decoding"
-                ] = sampling_params.response_format.to_guided_decoding_params(
-                    backend=RAYLLM_GUIDED_DECODING_BACKEND
-                )
-            if sampling_params.kv_transfer_params is not None:
-                kwargs["extra_args"] = {
-                    KV_TRANSFER_PARAMS_KEY: sampling_params.kv_transfer_params
-                }
+                logger.warning("max_tokens is ignored in SGLang server. Use max_new_tokens instead.")
+            if sampling_params.max_new_tokens is not None:
+                kwargs["max_new_tokens"] = sampling_params.max_new_tokens 
+            
+            print(f"[DEBUG] sampling_params={sampling_params}, sampling_params.max_new_tokens={sampling_params.max_new_tokens} ")
 
-            return vllm.SamplingParams(**kwargs)
+            return kwargs
         except Exception as e:
             # Wrap the error in ValidationError so the status code
             # returned to the user is correct.
