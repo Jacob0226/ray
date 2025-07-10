@@ -322,7 +322,6 @@ class SGLangEngine(LLMEngine):
         logger.info("Started vLLM engine.")
 
     async def _start_engine(self) -> "EngineBase":
-        
         node_initialization = await self.initialize_node(self.llm_config)       
         pg = node_initialization.placement_group
         runtime_env = node_initialization.runtime_env
@@ -340,14 +339,17 @@ class SGLangEngine(LLMEngine):
         # ).remote(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
         # await engine_actor.start.remote()
         # return engine_actor
-
+        
         from sglang.srt.entrypoints.engine import Engine
+        engine = Engine(**self.llm_config.engine_kwargs)
+        '''
         engine = Engine(
             model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", # ToDo
             mem_fraction_static=0.5,
             tp_size=8,
             cuda_graph_max_bs=64,
-        ) 
+        )
+        '''
         return engine
 
     async def prepare_request(
