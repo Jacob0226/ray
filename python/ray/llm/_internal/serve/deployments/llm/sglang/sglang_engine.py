@@ -329,19 +329,26 @@ class SGLangEngine(LLMEngine):
         print(f"[DEBUG]  node_initialization.placement_group={node_initialization.placement_group}", flush=True) 
         # ToDo: Convert self.llm_config (LLMConfig) into SGLang args
         
-        engine_actor = EngineActor.options(
-            num_cpus=0,  # or 0
-            num_gpus=1,  # or more depending on your tp
-            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                placement_group=pg,
-                placement_group_capture_child_tasks=True,
-            ),
-            runtime_env=runtime_env
-        ).remote(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
-        await engine_actor.start.remote()
+        # engine_actor = EngineActor.options(
+        #     num_cpus=0,  # or 0
+        #     num_gpus=1,  # or more depending on your tp
+        #     scheduling_strategy=PlacementGroupSchedulingStrategy(
+        #         placement_group=pg,
+        #         placement_group_capture_child_tasks=True,
+        #     ),
+        #     runtime_env=runtime_env
+        # ).remote(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
+        # await engine_actor.start.remote()
+        # return engine_actor
 
-        return engine_actor
-
+        from sglang.srt.entrypoints.engine import Engine
+        engine = Engine(
+            model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", # ToDo
+            mem_fraction_static=0.5,
+            tp_size=8,
+            cuda_graph_max_bs=64,
+        ) 
+        return engine
 
     async def prepare_request(
         self,
@@ -412,6 +419,19 @@ class SGLangEngine(LLMEngine):
         sglang_request = SGLangGenerationRequest(**request_params)
         return sglang_request
 
+    def trim_overlap(self, existing_text, new_chunk):
+        """
+        Finds the largest suffix of 'existing_text' that is a prefix of 'new_chunk'
+        and removes that overlap from the start of 'new_chunk'.
+        """
+        max_overlap = 0
+        max_possible = min(len(existing_text), len(new_chunk))
+        for i in range(max_possible, 0, -1):
+            if existing_text.endswith(new_chunk[:i]):
+                max_overlap = i
+                break
+        return new_chunk[max_overlap:]
+
     async def generate(
         self, request: GenerationRequest
     ) -> AsyncGenerator[LLMRawResponse, None]:
@@ -450,17 +470,20 @@ class SGLangEngine(LLMEngine):
         print(f"[DEBUG] request={request}")
         sampling_params_dict=self._parse_sampling_params(request.sampling_params)
         print(f"[DEBUG] sampling_params_dict={sampling_params_dict}")
-        
-        if request.stream == False:
-            results_generator: Union[Dict, AsyncIterator[Dict]] = await self.engine.generate.remote(
-                request=request,
-                sampling_params=sampling_params_dict,
-                # lora_request=request.lora_request,  # Skip for now
-            )
-            meta_info = results_generator['meta_info']
+
+        if request.stream==False:
+            result = await self.engine.async_generate(
+                    prompt=request.prompt,
+                    input_ids=request.prompt_token_ids,
+                    sampling_params=sampling_params_dict,
+                    stream=request.stream, 
+                    # image_data=image_data,
+                )
+            print(f"[DEBUG] result={result}", flush=True)
+            meta_info = result['meta_info']
             clock = MsClock(unit=ClockUnit.s)
             yield LLMRawResponse(
-                generated_text=results_generator['text'],
+                generated_text=result['text'],
                 num_generated_tokens=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
                 # logprobs=log_probs,
                 num_generated_tokens_batch=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
@@ -472,34 +495,22 @@ class SGLangEngine(LLMEngine):
                 metadata=meta_info,
             )
         else:
-            object_ref: Union[Dict, AsyncGenerator[Dict]] = self.engine.generate.remote(
-                request=request,
-                sampling_params=sampling_params_dict,
-                # lora_request=request.lora_request,  # Skip for now
-            )
-            results_generator = await object_ref
-
-            async for item in results_generator:
-                yield LLMRawResponse(
-                    generated_text="Test"
+            generator = await self.engine.async_generate(
+                    prompt=request.prompt,
+                    input_ids=request.prompt_token_ids,
+                    sampling_params=sampling_params_dict,
+                    stream=request.stream, 
+                    # image_data=image_data,
                 )
-                # print(f"[DEBUG] request_output={request_output}", flush=True)
-       
+            final_text = ""
+            async for chunk in generator:
+                chunk_text = chunk["text"]
+                cleaned_chunk = self.trim_overlap(final_text, chunk_text)
+                final_text += cleaned_chunk
+                # print(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
+                yield LLMRawResponse(
+                    generated_text=final_text)
         
-        # meta_info = results_generator['meta_info']
-        # yield LLMRawResponse(
-        #         generated_text=results_generator['text'],
-        #         num_generated_tokens=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
-        #         # logprobs=log_probs,
-        #         num_generated_tokens_batch=meta_info['completion_tokens'] - meta_info['prompt_tokens'],
-        #         num_input_tokens=meta_info['prompt_tokens'],
-        #         num_input_tokens_batch=meta_info['prompt_tokens'],
-        #         preprocessing_time=0,
-        #         generation_time=clock.reset_interval(),
-        #         finish_reason=meta_info['finish_reason']['type'],
-        #         metadata=meta_info,
-        #     )
-
 
         # # Loop over the results
         # num_text_returned = 0
