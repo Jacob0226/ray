@@ -251,8 +251,7 @@ class SGLangEngine(LLMEngine):
         # Chat template content format (openai or string)
         self._resolved_content_format = None
         # Also need local instance of the tokenizer to manage prompt formatting.
-        from transformers import AutoTokenizer
-        self._tokenizer = AutoTokenizer.from_pretrained("/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
+        self._tokenizer = None
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
         self._atokenize = vllm.utils.make_async(
@@ -328,20 +327,10 @@ class SGLangEngine(LLMEngine):
         print(f"[DEBUG]  node_initialization.placement_group={node_initialization.placement_group}", flush=True) 
         # ToDo: Convert self.llm_config (LLMConfig) into SGLang args
         
-        # engine_actor = EngineActor.options(
-        #     num_cpus=0,  # or 0
-        #     num_gpus=1,  # or more depending on your tp
-        #     scheduling_strategy=PlacementGroupSchedulingStrategy(
-        #         placement_group=pg,
-        #         placement_group_capture_child_tasks=True,
-        #     ),
-        #     runtime_env=runtime_env
-        # ).remote(model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct")
-        # await engine_actor.start.remote()
-        # return engine_actor
-        
         from sglang.srt.entrypoints.engine import Engine
+        from transformers import AutoTokenizer
         engine = Engine(**self.llm_config.engine_kwargs)
+        self._tokenizer = AutoTokenizer.from_pretrained(self.llm_config.engine_kwargs["model_path"])
         '''
         engine = Engine(
             model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", # ToDo
@@ -402,9 +391,9 @@ class SGLangEngine(LLMEngine):
         else:
             prompt_text = prompt.prompt
 
-        print(f"[DEBUG] prompt_text={prompt_text}", flush=True)
         # Pass to SGLang tokenizer
         prompt_token_ids = await self._atokenize(prompt_text)
+        print(f"[DEBUG] prompt_text={prompt_text}", flush=True)
         print(f"[DEBUG] prompt_token_ids={prompt_token_ids}", flush=True)
 
         request_params = {
@@ -469,11 +458,12 @@ class SGLangEngine(LLMEngine):
         #     )
 
         # Construct a results generator from SGLang
-        print(f"[DEBUG] request={request}")
+        print(f"[DEBUG] request={request}", flush=True)
         sampling_params_dict=self._parse_sampling_params(request.sampling_params)
-        print(f"[DEBUG] sampling_params_dict={sampling_params_dict}")
+        print(f"[DEBUG] sampling_params_dict={sampling_params_dict}", flush=True)
 
         if request.stream==False:
+            # print(f"[DEBUG] Non-Streaming", flush=True)
             result = await self.engine.async_generate(
                     prompt=request.prompt,
                     input_ids=request.prompt_token_ids,
@@ -497,6 +487,7 @@ class SGLangEngine(LLMEngine):
                 metadata=meta_info,
             )
         else:
+            # print(f"[DEBUG] Streaming", flush=True)
             generator = await self.engine.async_generate(
                     prompt=request.prompt,
                     input_ids=request.prompt_token_ids,
@@ -505,13 +496,27 @@ class SGLangEngine(LLMEngine):
                     # image_data=image_data,
                 )
             final_text = ""
+            
+            clock = MsClock(unit=ClockUnit.s)
             async for chunk in generator:
+                # print(f"[DEBUG] chunk={chunk}", flush=True)
+                meta_info = chunk['meta_info']
                 chunk_text = chunk["text"]
                 cleaned_chunk = self.trim_overlap(final_text, chunk_text)
                 final_text += cleaned_chunk
                 # print(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
                 yield LLMRawResponse(
-                    generated_text=final_text)
+                    generated_text=final_text,
+                    num_generated_tokens=meta_info['completion_tokens'],
+                    # logprobs=log_probs,
+                    # num_generated_tokens_batch=meta_info['completion_tokens'],
+                    num_input_tokens=meta_info['prompt_tokens'],
+                    # num_input_tokens_batch=meta_info['prompt_tokens'],
+                    preprocessing_time=0,
+                    generation_time=clock.reset_interval(),
+                    # finish_reason=meta_info['finish_reason']['type'],
+                    metadata=meta_info,
+                )
         
 
         # # Loop over the results
@@ -790,7 +795,6 @@ class SGLangEngine(LLMEngine):
             #             "if top_logprobs is specified, logprobs must be set to `True`"
             #         )
                     
-            print(f"[DEBUG] self.model_config={self.model_config}", flush=True)
             kwargs = dict(
                 n=1,
                 presence_penalty=0.0,
@@ -802,7 +806,6 @@ class SGLangEngine(LLMEngine):
                 stop=sampling_params.stop,
                 stop_token_ids=sampling_params.stop_tokens,
                 ignore_eos=False,
-                max_new_tokens=sampling_params.max_new_tokens,
             )
             if sampling_params.presence_penalty is not None:
                 kwargs["presence_penalty"] = sampling_params.presence_penalty
@@ -819,11 +822,9 @@ class SGLangEngine(LLMEngine):
             if sampling_params.ignore_eos is not None:
                 kwargs["ignore_eos"] = sampling_params.ignore_eos
             if sampling_params.max_tokens is not None:
-                logger.warning("max_tokens is ignored in SGLang server. Use max_new_tokens instead.")
-            if sampling_params.max_new_tokens is not None:
-                kwargs["max_new_tokens"] = sampling_params.max_new_tokens 
+                kwargs["max_new_tokens"] = sampling_params.max_tokens 
             
-            print(f"[DEBUG] sampling_params={sampling_params}, sampling_params.max_new_tokens={sampling_params.max_new_tokens} ")
+            print(f"[DEBUG] sampling_params={sampling_params}", flush=True)
 
             return kwargs
         except Exception as e:

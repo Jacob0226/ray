@@ -397,7 +397,6 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    max_new_tokens: Optional[int] = 16 # SGLang
     n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)

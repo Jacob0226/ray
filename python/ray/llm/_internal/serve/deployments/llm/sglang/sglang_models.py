@@ -225,11 +225,11 @@ class SGLangSamplingParams(SamplingParams):
 
     _ignored_fields = {"best_of", "n", "logit_bias"}
 
-    max_new_tokens: Optional[int] = None
     top_k: Optional[int] = None
     repetition_penalty: Optional[float] = None
     seed: Optional[int] = None
     kv_transfer_params: Optional[Dict[str, Any]] = None # Not supported
+
 
     @field_validator("n", mode="before")
     @classmethod
