@@ -182,39 +182,6 @@ class _EngineBackgroundProcess:
     def get_error(self):
         return self._error
 
-@ray.remote
-class EngineActor:
-    def __init__(self, model_path):
-        from sglang.srt.entrypoints.engine import Engine
-
-        self.model_path = model_path
-        self.engine = None
-
-    async def start(self):
-        from sglang.srt.entrypoints.engine import Engine
-        self.engine = Engine(
-            model_path=self.model_path, # ToDo
-            mem_fraction_static=0.5,
-            tp_size=8,
-            cuda_graph_max_bs=64,
-        ) 
-
-        self.tokenizer=self.engine.tokenizer_manager
-
-    async def generate(self, 
-        request: GenerationRequest, 
-        sampling_params: dict, 
-        ) -> Union[Dict, AsyncIterator[Dict]]: # AsyncGenerator[dict, None]: 
-        generated_output = await self.engine.async_generate(
-            prompt=request.prompt,
-            input_ids=request.prompt_token_ids,
-            sampling_params=sampling_params,
-            stream=request.stream, 
-            # image_data=image_data,
-        )
-        print(f"[DEBUG] [remote] generated_output={generated_output}", flush=True)
-        return generated_output
-
 
 
 # Note: Ray has 2 LLMEngine class. One is from server_models.py for vLLM/SGLang enum. The other one is for LLM abstract class.
@@ -288,7 +255,7 @@ class SGLangEngine(LLMEngine):
             logger.info("Skipping engine restart because the engine is already running")
             return
 
-        logger.info(f"[DEBUG] self.llm_config={self.llm_config}")
+        # logger.info(f"[DEBUG] self.llm_config={self.llm_config}")
         self.model_config = {"mem_fraction_static":0.5}
         self.engine = await self._start_engine()
         self.running = True
@@ -393,8 +360,8 @@ class SGLangEngine(LLMEngine):
 
         # Pass to SGLang tokenizer
         prompt_token_ids = await self._atokenize(prompt_text)
-        print(f"[DEBUG] prompt_text={prompt_text}", flush=True)
-        print(f"[DEBUG] prompt_token_ids={prompt_token_ids}", flush=True)
+        logger.debug(f"[DEBUG] prompt_text={prompt_text}")
+        logger.debug(f"[DEBUG] prompt_token_ids={prompt_token_ids}")
 
         request_params = {
             "prompt": prompt_text,
@@ -458,9 +425,9 @@ class SGLangEngine(LLMEngine):
         #     )
 
         # Construct a results generator from SGLang
-        print(f"[DEBUG] request={request}", flush=True)
+        logger.debug(f"[DEBUG] request={request}", flush=True)
         sampling_params_dict=self._parse_sampling_params(request.sampling_params)
-        print(f"[DEBUG] sampling_params_dict={sampling_params_dict}", flush=True)
+        logger.debug(f"[DEBUG] sampling_params_dict={sampling_params_dict}", flush=True)
 
         if request.stream==False:
             # print(f"[DEBUG] Non-Streaming", flush=True)
@@ -471,7 +438,7 @@ class SGLangEngine(LLMEngine):
                     stream=request.stream, 
                     # image_data=image_data,
                 )
-            print(f"[DEBUG] result={result}", flush=True)
+            logger.debug(f"[DEBUG] result={result}", flush=True)
             meta_info = result['meta_info']
             clock = MsClock(unit=ClockUnit.s)
             yield LLMRawResponse(
@@ -499,12 +466,12 @@ class SGLangEngine(LLMEngine):
             
             clock = MsClock(unit=ClockUnit.s)
             async for chunk in generator:
-                # print(f"[DEBUG] chunk={chunk}", flush=True)
+                # logger.debug(f"[DEBUG] chunk={chunk}", flush=True)
                 meta_info = chunk['meta_info']
                 chunk_text = chunk["text"]
                 cleaned_chunk = self.trim_overlap(final_text, chunk_text)
                 final_text += cleaned_chunk
-                # print(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
+                # logger.debug(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
                 yield LLMRawResponse(
                     generated_text=final_text,
                     num_generated_tokens=meta_info['completion_tokens'],
@@ -824,7 +791,7 @@ class SGLangEngine(LLMEngine):
             if sampling_params.max_tokens is not None:
                 kwargs["max_new_tokens"] = sampling_params.max_tokens 
             
-            print(f"[DEBUG] sampling_params={sampling_params}", flush=True)
+            # print(f"[DEBUG] sampling_params={sampling_params}", flush=True)
 
             return kwargs
         except Exception as e:
