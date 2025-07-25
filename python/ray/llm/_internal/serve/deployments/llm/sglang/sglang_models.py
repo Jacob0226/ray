@@ -124,11 +124,11 @@ class SGLangEngineConfig(BaseModelExtended):
 
     @property
     def tensor_parallel_degree(self) -> int:
-        return self.engine_kwargs.get("tensor_parallel_size", 1)
+        return self.engine_kwargs.get("tp_size", 1)
 
     @property
     def pipeline_parallel_degree(self) -> int:
-        return self.engine_kwargs.get("pipeline_parallel_size", 1)
+        return self.engine_kwargs.get("pp_size", 1)
 
     @property
     def num_devices(self) -> int:
@@ -194,6 +194,8 @@ class SGLangEngineConfig(BaseModelExtended):
                 pg.id,
                 placement_group_table(pg),
             )
+            print(f"[DEBUG] pg={pg}", flush=True)
+            print(f"[DEBUG] SGLang Using existing placement group\n\n", flush=True)
         else:
             if not ALLOW_NEW_PLACEMENT_GROUPS_IN_DEPLOYMENT:
                 raise RuntimeError(
@@ -206,7 +208,8 @@ class SGLangEngineConfig(BaseModelExtended):
             )
 
             logger.info(f"Using new placement group {pg}. {placement_group_table(pg)}")
-        logger.info(f"[DEBUG]  self.placement_bundles={self.placement_bundles}")    
+            print(f"[DEBUG] SGLang self.placement_bundles={self.placement_bundles}", flush=True)
+        logger.info(f"[DEBUG] SGLang self.placement_bundles={self.placement_bundles}")    
         print(f"[DEBUG]  replacement group {pg}. {placement_group_table(pg)}", flush=True)    
         return pg
 

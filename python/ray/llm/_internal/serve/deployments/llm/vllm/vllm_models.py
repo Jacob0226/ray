@@ -204,6 +204,7 @@ class VLLMEngineConfig(BaseModelExtended):
                 self.placement_bundles, strategy=self.placement_strategy
             )
 
+            print(f"[DEBUG] vLLM self.placement_bundles={self.placement_bundles}", flush=True)
             logger.info(f"Using new placement group {pg}. {placement_group_table(pg)}")
         return pg
 

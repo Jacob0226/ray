@@ -443,13 +443,13 @@ class LLMServer(_LLMServerBase):
 
         # self._engine_cls = engine_cls or self._default_engine_cls # self._default_engine_cls is vLLMEngine
         # self.engine = self._get_engine_class(self._llm_config)
-        print(f"[DEBUG] self._llm_config={self._llm_config}, type={type(self._llm_config)}")
+        print(f"[DEBUG] self._llm_config={self._llm_config}, type={type(self._llm_config)}", flush=True)
         if self._llm_config.llm_engine == "SGLang":
             self._engine_cls = SGLangEngine
             self.engine = SGLangEngine(self._llm_config)
         elif self._llm_config.llm_engine == "vLLM":
-            self._engine_cls = vLLMEngine
-            self.engine = vLLMEngine(self._llm_config)
+            self._engine_cls = VLLMEngine
+            self.engine = VLLMEngine(self._llm_config)
 
         await asyncio.wait_for(self._start_engine(), timeout=ENGINE_START_TIMEOUT_S)
 

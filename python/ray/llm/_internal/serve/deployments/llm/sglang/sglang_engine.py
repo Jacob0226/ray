@@ -56,6 +56,13 @@ from ray.util import metrics
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from ray.util.placement_group import (
+    PlacementGroup,
+    get_current_placement_group,
+    placement_group,
+    placement_group_table,
+)
+
 if TYPE_CHECKING:
     from vllm import SamplingParams as VLLMInternalSamplingParams
     # from vllm.config import ModelConfig, VllmConfig
@@ -183,6 +190,15 @@ class _EngineBackgroundProcess:
         return self._error
 
 
+# @ray.remote(num_gpus=1, num_cpus=1)
+# class SGLangEngineWorker:
+#     def __init__(self, engine_kwargs: dict):
+#         from sglang.srt.entrypoints.engine import Engine
+#         self.engine = Engine(**engine_kwargs)
+
+#     def generate(self, prompt: str):
+#         return self.engine.generate(prompt)
+
 
 # Note: Ray has 2 LLMEngine class. One is from server_models.py for vLLM/SGLang enum. The other one is for LLM abstract class.
 class SGLangEngine(LLMEngine):
@@ -291,21 +307,15 @@ class SGLangEngine(LLMEngine):
         node_initialization = await self.initialize_node(self.llm_config)       
         pg = node_initialization.placement_group
         runtime_env = node_initialization.runtime_env
-        print(f"[DEBUG]  node_initialization.placement_group={node_initialization.placement_group}", flush=True) 
+        print(f"[DEBUG] SGLang node_initialization.placement_group.bundle_specs={node_initialization.placement_group.bundle_specs}", flush=True)
+        print(f"[DEBUG] SGLang placement_group_table={placement_group_table(node_initialization.placement_group)}", flush=True)
+        print("\n\n\n\n", flush=True) 
         # ToDo: Convert self.llm_config (LLMConfig) into SGLang args
         
         from sglang.srt.entrypoints.engine import Engine
         from transformers import AutoTokenizer
         engine = Engine(**self.llm_config.engine_kwargs)
         self._tokenizer = AutoTokenizer.from_pretrained(self.llm_config.engine_kwargs["model_path"])
-        '''
-        engine = Engine(
-            model_path="/data/huggingface/hub/meta-llama/Llama-3.1-8B-Instruct", # ToDo
-            mem_fraction_static=0.5,
-            tp_size=8,
-            cuda_graph_max_bs=64,
-        )
-        '''
         return engine
 
     async def prepare_request(

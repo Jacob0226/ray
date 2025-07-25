@@ -349,6 +349,7 @@ class VLLMEngine(LLMEngine):
             node_initialization: The node initialization.
         """
         # Initialize node and return all configurations
+        
         node_initialization = await self.initialize_node(self.llm_config)
 
         if self.engine_config.use_gpu:
@@ -402,6 +403,8 @@ class VLLMEngine(LLMEngine):
             node_initialization,
         ) = await self._prepare_engine_config(use_v1=True)
 
+        print(f"[DEBUG] vLLM node_initialization.placement_group={node_initialization.placement_group}", flush=True) 
+
         return self._start_async_llm_engine(
             engine_args,
             engine_config,
@@ -418,12 +421,15 @@ class VLLMEngine(LLMEngine):
             node_initialization,
         ) = await self._prepare_engine_config(use_v1=False)
 
+        print(f"[DEBUG] vLLM node_initialization.placement_group={node_initialization.placement_group}", flush=True) 
+
         if MQLLMEngineClient.is_unsupported_config(engine_config):
             # If the engine is not supported, we fall back to the legacy async engine.
             #
             # Note (genesu): as of 2025-02-11, this code path is only triggered when
             # pipeline parallelism is > 1. And this is due to the vllm mq engine have
             # not implemented the pipeline parallelism yet.
+            print(f"[DEBUG] _start_async_llm_engine, node_initialization.placement_group={node_initialization.placement_group}", flush=True)
             return self._start_async_llm_engine(
                 engine_args,
                 engine_config,
@@ -431,6 +437,7 @@ class VLLMEngine(LLMEngine):
                 use_v1=False,
             )
 
+        print(f"[DEBUG] _start_mq_engine, node_initialization.placement_group={node_initialization.placement_group}", flush=True)
         return await self._start_mq_engine(
             engine_args, engine_config, node_initialization.placement_group
         )

@@ -414,6 +414,8 @@ class LLMConfig(BaseModelExtended):
             # May happen if all bundles are empty.
             bundles = []
 
+        print(f"[DEBUG] engine_config={engine_config}", flush=True)
+        print(f"[DEBUG] replica_actor_resources={replica_actor_resources},  bundles={bundles}", flush=True)
         bundles = [replica_actor_resources] + bundles
         deployment_config.update(
             {
@@ -422,7 +424,7 @@ class LLMConfig(BaseModelExtended):
             }
         )
         
-        print(f"[DEBUG] deployment_config={deployment_config} ")
+        print(f"[DEBUG] deployment_config={deployment_config} ", flush=True)
         return deployment_config
 
     def _get_deployment_name(self) -> str:
