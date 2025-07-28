@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 vllm = try_import("vllm")
 logger = get_logger(__name__)
-
+import  vllm.utils
 time_in_queue_histogram = metrics.Histogram(
     "vllm_engine_stats_time_in_queue_ms",
     "Time a request spends in the queue first forward pass not included (ms).",

@@ -190,14 +190,36 @@ class _EngineBackgroundProcess:
         return self._error
 
 
-# @ray.remote(num_gpus=1, num_cpus=1)
-# class SGLangEngineWorker:
-#     def __init__(self, engine_kwargs: dict):
-#         from sglang.srt.entrypoints.engine import Engine
-#         self.engine = Engine(**engine_kwargs)
+@ray.remote
+class SGLangEngineWorker:
+    def __init__(self, engine_kwargs: dict):
+        self.engine_kwargs=engine_kwargs
+        
+    async def start(self):
+        from sglang.srt.entrypoints.engine import Engine
+        self.engine = Engine(**self.engine_kwargs)
 
-#     def generate(self, prompt: str):
-#         return self.engine.generate(prompt)
+    async def generate_non_stream(self, prompt, input_ids, sampling_params, stream):
+        result = await self.engine.async_generate(
+                prompt=prompt,
+                input_ids=input_ids,
+                sampling_params=sampling_params,
+                stream=stream, # This will be False
+            )
+        return result
+
+    async def generate_stream(self, prompt, input_ids, sampling_params, stream):
+        generator = await self.engine.async_generate(
+                prompt=prompt,
+                input_ids=input_ids,
+                sampling_params=sampling_params,
+                stream=stream,
+            )
+        async for chunk in generator:
+            yield chunk  
+            
+
+        
 
 
 # Note: Ray has 2 LLMEngine class. One is from server_models.py for vLLM/SGLang enum. The other one is for LLM abstract class.
@@ -272,7 +294,6 @@ class SGLangEngine(LLMEngine):
             return
 
         # logger.info(f"[DEBUG] self.llm_config={self.llm_config}")
-        self.model_config = {"mem_fraction_static":0.5}
         self.engine = await self._start_engine()
         self.running = True
 
@@ -314,9 +335,20 @@ class SGLangEngine(LLMEngine):
         
         from sglang.srt.entrypoints.engine import Engine
         from transformers import AutoTokenizer
-        engine = Engine(**self.llm_config.engine_kwargs)
+        # engine = Engine(**self.llm_config.engine_kwargs)
+        SGLangConfig = self.llm_config.get_engine_config()
+        engine_actor = SGLangEngineWorker.options(
+                num_gpus=SGLangConfig.num_devices,
+                num_cpus=0,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_capture_child_tasks=True,
+                ),
+                runtime_env=runtime_env,
+            ).remote(self.llm_config.engine_kwargs)
+        await engine_actor.start.remote()
         self._tokenizer = AutoTokenizer.from_pretrained(self.llm_config.engine_kwargs["model_path"])
-        return engine
+        return engine_actor
 
     async def prepare_request(
         self,
@@ -386,7 +418,7 @@ class SGLangEngine(LLMEngine):
 
         sglang_request = SGLangGenerationRequest(**request_params)
         return sglang_request
-
+    
     def trim_overlap(self, existing_text, new_chunk):
         """
         Finds the largest suffix of 'existing_text' that is a prefix of 'new_chunk'
@@ -408,14 +440,6 @@ class SGLangEngine(LLMEngine):
         The SGLang generation request will be passed into SGLang, and the resulting output
         will be wrapped in an LLMRawResponse and yielded back to the user.
 
-        Error handling:
-
-        We schedule a finalizer that will abort the request on the engine.
-
-        If an exception is raised in this function or vllm, the finalizer guarantees that the request is aborted.
-        If an exception is raised in the caller, when this generator is gced, it will run the finalizer and abort the request.
-
-        This should also handle the case where the caller is cancelled (raises asyncio.CancelledError)
         """
         if RAYLLM_ENABLE_REQUEST_PROMPT_LOGS:
             logger.info(
@@ -439,15 +463,22 @@ class SGLangEngine(LLMEngine):
         sampling_params_dict=self._parse_sampling_params(request.sampling_params)
         logger.debug(f"[DEBUG] sampling_params_dict={sampling_params_dict}", flush=True)
 
-        if request.stream==False:
-            # print(f"[DEBUG] Non-Streaming", flush=True)
-            result = await self.engine.async_generate(
-                    prompt=request.prompt,
-                    input_ids=request.prompt_token_ids,
-                    sampling_params=sampling_params_dict,
-                    stream=request.stream, 
-                    # image_data=image_data,
-                )
+        # if request.stream==False:
+        #     # print(f"[DEBUG] Non-Streaming", flush=True)
+        #     result = await self.engine.async_generate(
+        #             prompt=request.prompt,
+        #             input_ids=request.prompt_token_ids,
+        #             sampling_params=sampling_params_dict,
+        #             stream=request.stream, 
+        #             # image_data=image_data,
+        #         )
+        if request.stream == False:
+            result = await self.engine.generate_non_stream.remote(
+                prompt=request.prompt,
+                input_ids=request.prompt_token_ids,
+                sampling_params=sampling_params_dict,
+                stream=False,
+            )
             logger.debug(f"[DEBUG] result={result}", flush=True)
             meta_info = result['meta_info']
             clock = MsClock(unit=ClockUnit.s)
@@ -464,36 +495,64 @@ class SGLangEngine(LLMEngine):
                 metadata=meta_info,
             )
         else:
-            # print(f"[DEBUG] Streaming", flush=True)
-            generator = await self.engine.async_generate(
+            final_text = ""
+            clock = MsClock(unit=ClockUnit.s)
+            for ref in self.engine.generate_stream.remote(
                     prompt=request.prompt,
                     input_ids=request.prompt_token_ids,
                     sampling_params=sampling_params_dict,
-                    stream=request.stream, 
-                    # image_data=image_data,
-                )
-            final_text = ""
-            
-            clock = MsClock(unit=ClockUnit.s)
-            async for chunk in generator:
-                # logger.debug(f"[DEBUG] chunk={chunk}", flush=True)
-                meta_info = chunk['meta_info']
+                    stream=True,
+                ):
+                chunk = ray.get(ref)
                 chunk_text = chunk["text"]
+                meta_info = chunk['meta_info']
+                # print(f"[DEBUG] chunk = {chunk}", flush=True)
+                finish_reason = meta_info["finish_reason"]["type"] if meta_info["finish_reason"] else None
                 cleaned_chunk = self.trim_overlap(final_text, chunk_text)
                 final_text += cleaned_chunk
-                # logger.debug(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
+                
+                
                 yield LLMRawResponse(
                     generated_text=final_text,
                     num_generated_tokens=meta_info['completion_tokens'],
                     # logprobs=log_probs,
-                    # num_generated_tokens_batch=meta_info['completion_tokens'],
+                    num_generated_tokens_batch=meta_info['completion_tokens'],
                     num_input_tokens=meta_info['prompt_tokens'],
-                    # num_input_tokens_batch=meta_info['prompt_tokens'],
+                    num_input_tokens_batch=meta_info['prompt_tokens'],
                     preprocessing_time=0,
                     generation_time=clock.reset_interval(),
-                    # finish_reason=meta_info['finish_reason']['type'],
+                    finish_reason=finish_reason,
                     metadata=meta_info,
                 )
+            # print(f"[DEBUG] Streaming", flush=True)
+            # generator = await self.engine.async_generate(
+            #         prompt=request.prompt,
+            #         input_ids=request.prompt_token_ids,
+            #         sampling_params=sampling_params_dict,
+            #         stream=request.stream, 
+            #         # image_data=image_data,
+            #     )
+            # final_text = ""
+            # clock = MsClock(unit=ClockUnit.s)
+            # async for chunk in generator:
+            #     # logger.debug(f"[DEBUG] chunk={chunk}", flush=True)
+            #     meta_info = chunk['meta_info']
+            #     chunk_text = chunk["text"]
+            #     cleaned_chunk = self.trim_overlap(final_text, chunk_text)
+            #     final_text += cleaned_chunk
+            #     # logger.debug(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
+            #     yield LLMRawResponse(
+            #         generated_text=final_text,
+            #         num_generated_tokens=meta_info['completion_tokens'],
+            #         # logprobs=log_probs,
+            #         # num_generated_tokens_batch=meta_info['completion_tokens'],
+            #         num_input_tokens=meta_info['prompt_tokens'],
+            #         # num_input_tokens_batch=meta_info['prompt_tokens'],
+            #         preprocessing_time=0,
+            #         generation_time=clock.reset_interval(),
+            #         # finish_reason=meta_info['finish_reason']['type'],
+            #         metadata=meta_info,
+            #     )
         
 
         # # Loop over the results

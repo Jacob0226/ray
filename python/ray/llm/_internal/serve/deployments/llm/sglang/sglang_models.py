@@ -146,10 +146,10 @@ class SGLangEngineConfig(BaseModelExtended):
         if self.resources_per_bundle:
             bundle = self.resources_per_bundle
         else:
-            bundle = {"GPU": 1}
+            bundle = {"GPU": self.num_devices}
         if self.accelerator_type:
             bundle[self.ray_accelerator_type()] = 0.001
-        bundles = [bundle for _ in range(self.num_devices)]
+        bundles = [bundle]
 
         return bundles
 
