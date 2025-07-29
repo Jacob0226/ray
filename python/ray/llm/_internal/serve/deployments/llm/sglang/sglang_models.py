@@ -65,6 +65,7 @@ class SGLangEngineConfig(BaseModelExtended):
     )
     runtime_env: Optional[Dict[str, Any]] = None
     engine_kwargs: Dict[str, Any] = {}
+    deployment_config: Dict[str, Any] = {}
 
     @property
     def actual_hf_model_id(self) -> str:
@@ -116,6 +117,7 @@ class SGLangEngineConfig(BaseModelExtended):
             accelerator_type=llm_config.accelerator_type,
             engine_kwargs=llm_config.engine_kwargs,
             runtime_env=llm_config.runtime_env,
+            deployment_config=llm_config.deployment_config,
         )
 
     def ray_accelerator_type(self) -> str:
@@ -146,7 +148,7 @@ class SGLangEngineConfig(BaseModelExtended):
         if self.resources_per_bundle:
             bundle = self.resources_per_bundle
         else:
-            bundle = {"GPU": self.num_devices}
+            bundle = {"GPU": self.num_devices, "CPU": self.deployment_config['ray_actor_options']['num_cpus']}
         if self.accelerator_type:
             bundle[self.ray_accelerator_type()] = 0.001
         bundles = [bundle]
@@ -188,7 +190,7 @@ class SGLangEngineConfig(BaseModelExtended):
         Else, create a new placement group based on the scaling config.
         """
         pg = get_current_placement_group()
-        if pg:
+        if False and pg:
             logger.debug(
                 "Using existing placement group %s, details: %s",
                 pg.id,
@@ -208,7 +210,7 @@ class SGLangEngineConfig(BaseModelExtended):
             )
 
             logger.info(f"Using new placement group {pg}. {placement_group_table(pg)}")
-            print(f"[DEBUG] SGLang self.placement_bundles={self.placement_bundles}", flush=True)
+            print(f"[DEBUG] SGLang use NEW self.placement_bundles={self.placement_bundles}", flush=True)
         logger.info(f"[DEBUG] SGLang self.placement_bundles={self.placement_bundles}")    
         print(f"[DEBUG]  replacement group {pg}. {placement_group_table(pg)}", flush=True)    
         return pg
