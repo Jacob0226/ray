@@ -190,7 +190,7 @@ class SGLangEngineConfig(BaseModelExtended):
         Else, create a new placement group based on the scaling config.
         """
         pg = get_current_placement_group()
-        if False and pg:
+        if pg:
             logger.debug(
                 "Using existing placement group %s, details: %s",
                 pg.id,

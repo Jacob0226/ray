@@ -97,6 +97,7 @@ class SGLangEngineWorker:
     async def start(self):
         import torch
         gpu_ids = ray.get_gpu_ids()  
+        print(f"[DEBUG] Before, HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")}", flush=True)
         os.environ["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_ids)
         print(f"[DEBUG] SGLang GPU HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")}", flush=True)
         # print(f'[DEBUG] ray.get_runtime_context(): {ray.get_runtime_context()}', flush=True)
@@ -202,26 +203,28 @@ class SGLangEngine(LLMEngine):
         logger.info("Started SGLang engine.")
 
     async def _start_engine(self) -> "EngineBase":
-        # node_initialization = await self.initialize_node(self.llm_config)    
-        # pg = node_initialization.placement_group
-        # runtime_env = node_initialization.runtime_env
+        
         n_cpu = self.llm_config.deployment_config['ray_actor_options']['num_cpus']
         n_gpu = self.engine_config.num_devices
-        runtime_env = self.engine_config.runtime_env
+        node_initialization = await self.initialize_node(self.llm_config)    
+        runtime_env = node_initialization.runtime_env # runtime_env = self.engine_config.runtime_env
+        pg = node_initialization.placement_group
+
+        # Bad allocation
+        # pg = placement_group([{"CPU": n_cpu}, {"GPU": n_gpu}], strategy="STRICT_PACK")
+        # ray.get(pg.ready())
         # print(f"[DEBUG] SGLang node_initialization.placement_group.bundle_specs={node_initialization.placement_group.bundle_specs}", flush=True)
         # print(f"[DEBUG] SGLang placement_group_table={placement_group_table(pg)}", flush=True)
         # print("\n\n\n\n", flush=True) 
-        # ToDo: Convert self.llm_config (LLMConfig) into SGLang args
         
-        from sglang.srt.entrypoints.engine import Engine
         from transformers import AutoTokenizer
         engine_actor = SGLangEngineWorker.options(
                 num_gpus=n_gpu,
                 num_cpus=n_cpu,
-                # scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    # placement_group=pg,
-                    # placement_group_capture_child_tasks=True,
-                # ),
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_capture_child_tasks=True,
+                ),
                 runtime_env=runtime_env,
             ).remote(self.llm_config.engine_kwargs)
         await engine_actor.start.remote()
