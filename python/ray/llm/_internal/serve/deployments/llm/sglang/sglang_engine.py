@@ -89,107 +89,6 @@ V1_TOO_LONG_PATTERN = re.compile(
 )
 
 
-# def _get_async_engine_args(llm_config: LLMConfig) -> "AsyncEngineArgs":
-#     engine_config = llm_config.get_engine_config()
-
-#     # This `model` is the local path on disk, or the hf model id.
-#     # If it is the hf_model_id, vLLM automatically downloads the correct model from HF.
-#     # We want this to be the local path on the disk when we already downloaded the
-#     # model artifacts from a remote storage during node initialization,
-#     # so vLLM will not require HF token for it and try to download it again.
-#     model = engine_config.actual_hf_model_id
-#     if isinstance(llm_config.model_loading_config.model_source, str):
-#         model = llm_config.model_loading_config.model_source
-
-#     return vllm.engine.arg_utils.AsyncEngineArgs(
-#         **{
-#             "model": model,
-#             "distributed_executor_backend": "ray",
-#             "guided_decoding_backend": RAYLLM_GUIDED_DECODING_BACKEND,
-#             "disable_log_stats": False,
-#             **engine_config.get_initialization_kwargs(),
-#         }
-#     )
-
-
-# def _get_vllm_engine_config(
-#     llm_config: LLMConfig,
-# ) -> Tuple["AsyncEngineArgs", "VllmConfig"]:
-#     async_engine_args = _get_async_engine_args(llm_config)
-#     vllm_config = async_engine_args.create_engine_config()
-#     return async_engine_args, vllm_config
-
-
-# def _clear_current_platform_cache():
-#     """Clear the cache of the current platform.
-
-#     vllm current has an lru cache for getting device compatibility
-#     that will not have the correct returned value if
-#     CUDA_VISIBLE_DEVICES is not set properly. In RayLLM eventually
-#     when we want to create the engine the env will be set properly,
-#     but till then, upon the import of vllm somewhere
-#     (which is a mystery) the lru cache will have the wrong value.
-#     This function will clear the cache so that the next time the
-#     cache is accessed, it will be re-evaluated.
-
-#     Related issues:
-#     https://github.com/vllm-project/vllm/issues/8402
-#     https://github.com/vllm-project/vllm/issues/7890
-#     """
-#     from vllm.platforms import current_platform
-
-#     # TODO(seiji): remove this once https://github.com/vllm-project/vllm/pull/18979 is merged
-#     if (
-#         "CUDA_VISIBLE_DEVICES" in os.environ
-#         and os.environ["CUDA_VISIBLE_DEVICES"] == ""
-#     ):
-#         del os.environ["CUDA_VISIBLE_DEVICES"]
-
-#     # This check is just to future proof this implementation
-#     # in case vllm removes their lru_cache decorator
-#     if hasattr(current_platform.get_device_capability, "cache_clear"):
-#         logger.info("Clearing the current platform cache ...")
-#         current_platform.get_device_capability.cache_clear()
-
-
-# class _EngineBackgroundProcess:
-#     def __init__(self, ipc_path, engine_args, engine_config):
-#         from vllm.engine.multiprocessing.engine import MQLLMEngine
-
-#         # Adapted from vllm.engine.multiprocessing.engine.MQLLMEngine.from_engine_args
-#         vllm.plugins.load_general_plugins()
-
-#         # Note (genesu): There is a bug in vllm 0.7.2 forced the use of uni processing
-#         # executor when world_size is 1. This is a bug in vllm 0.7.2 and
-#         # is fixed by https://github.com/vllm-project/vllm/pull/12934 which is shipped
-#         # with vllm 0.7.3. However, in Ray's llm package, we will enforce the use of
-#         # ray distributed executor for all cases so it's always compatible with Ray.
-#         from vllm.executor.ray_distributed_executor import RayDistributedExecutor
-
-#         # Clear the cache of the current platform.
-#         _clear_current_platform_cache()
-
-#         self.engine = MQLLMEngine(
-#             ipc_path=ipc_path,
-#             use_async_sockets=engine_config.model_config.use_async_output_proc,
-#             vllm_config=engine_config,
-#             executor_class=RayDistributedExecutor,
-#             log_requests=not engine_args.disable_log_requests,
-#             log_stats=not engine_args.disable_log_stats,
-#             usage_context=vllm.usage.usage_lib.UsageContext.API_SERVER,
-#         )
-#         self._error = None
-
-#     def start(self):
-#         try:
-#             self.engine.start()
-#         except Exception as e:
-#             self._error = e
-
-#     def get_error(self):
-#         return self._error
-
-
 @ray.remote
 class SGLangEngineWorker:
     def __init__(self, engine_kwargs: dict):
@@ -200,8 +99,8 @@ class SGLangEngineWorker:
         gpu_ids = ray.get_gpu_ids()  
         os.environ["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_ids)
         print(f"[DEBUG] SGLang GPU HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")}", flush=True)
-        print(f'[DEBUG] ray.get_runtime_context(): {ray.get_runtime_context()}', flush=True)
-        print(f"[DEBUG] gpu_ids: {gpu_ids}", flush=True)
+        # print(f'[DEBUG] ray.get_runtime_context(): {ray.get_runtime_context()}', flush=True)
+        # print(f"[DEBUG] gpu_ids: {gpu_ids}", flush=True)
         from sglang.srt.entrypoints.engine import Engine
         self.engine = Engine(**self.engine_kwargs)
 
@@ -224,8 +123,6 @@ class SGLangEngineWorker:
         async for chunk in generator:
             yield chunk  
             
-
-        
 
 
 # Note: Ray has 2 LLMEngine class. One is from server_models.py for vLLM/SGLang enum. The other one is for LLM abstract class.
@@ -286,13 +183,10 @@ class SGLangEngine(LLMEngine):
         return encoded.input_ids
 
     async def start(self):
-        """Start the vLLM engine.
+        """Start the SGLang engine.
 
         If the engine is already running, do nothing.
         """
-        from vllm.entrypoints.chat_utils import (
-            resolve_chat_template_content_format as _resolve_chat_template_content_format,
-        )
 
         if self.running:
             # The engine is already running!
@@ -304,41 +198,16 @@ class SGLangEngine(LLMEngine):
         self.running = True
 
 
-        # def resolve_chat_template_content_format(model_config, **kwargs):
-        #     try:
-        #         return _resolve_chat_template_content_format(
-        #             model_config=model_config, **kwargs
-        #         )
-        #     except TypeError:
-        #         # Legacy API before vLLM 0.9.0.
-        #         # TODO(#52975): Remove this try-except once vLLM <0.9.0 is no longer supported.
-        #         return _resolve_chat_template_content_format(
-        #             trust_remote_code=model_config.trust_remote_code, **kwargs
-        #         )
 
-        # self._resolved_content_format = resolve_chat_template_content_format(
-        #     model_config=self.model_config,
-        #     # Use HF to get the chat template so set it to None here.
-        #     chat_template=None,
-        #     # Default to None, change when it's needed.
-        #     # vLLM does not have a high level API to support all of this.
-        #     tools=None,
-        #     # Let vLLM decide the content format.
-        #     given_format="auto",
-        #     tokenizer=self._tokenizer,
-        # )
-
-        logger.info("Started vLLM engine.")
+        logger.info("Started SGLang engine.")
 
     async def _start_engine(self) -> "EngineBase":
         # node_initialization = await self.initialize_node(self.llm_config)    
         # pg = node_initialization.placement_group
+        # runtime_env = node_initialization.runtime_env
         n_cpu = self.llm_config.deployment_config['ray_actor_options']['num_cpus']
         n_gpu = self.engine_config.num_devices
-        # pg = placement_group([{"CPU": n_cpu, "GPU": n_gpu}], strategy="PACK") # STRICK_PACK
-
         runtime_env = self.engine_config.runtime_env
-        # runtime_env = node_initialization.runtime_env
         # print(f"[DEBUG] SGLang node_initialization.placement_group.bundle_specs={node_initialization.placement_group.bundle_specs}", flush=True)
         # print(f"[DEBUG] SGLang placement_group_table={placement_group_table(pg)}", flush=True)
         # print("\n\n\n\n", flush=True) 
@@ -468,19 +337,8 @@ class SGLangEngine(LLMEngine):
         #     )
 
         # Construct a results generator from SGLang
-        logger.debug(f"[DEBUG] request={request}", flush=True)
         sampling_params_dict=self._parse_sampling_params(request.sampling_params)
-        logger.debug(f"[DEBUG] sampling_params_dict={sampling_params_dict}", flush=True)
 
-        # if request.stream==False:
-        #     # print(f"[DEBUG] Non-Streaming", flush=True)
-        #     result = await self.engine.async_generate(
-        #             prompt=request.prompt,
-        #             input_ids=request.prompt_token_ids,
-        #             sampling_params=sampling_params_dict,
-        #             stream=request.stream, 
-        #             # image_data=image_data,
-        #         )
         if request.stream == False:
             result = await self.engine.generate_non_stream.remote(
                 prompt=request.prompt,
@@ -533,35 +391,7 @@ class SGLangEngine(LLMEngine):
                     finish_reason=finish_reason,
                     metadata=meta_info,
                 )
-            # print(f"[DEBUG] Streaming", flush=True)
-            # generator = await self.engine.async_generate(
-            #         prompt=request.prompt,
-            #         input_ids=request.prompt_token_ids,
-            #         sampling_params=sampling_params_dict,
-            #         stream=request.stream, 
-            #         # image_data=image_data,
-            #     )
-            # final_text = ""
-            # clock = MsClock(unit=ClockUnit.s)
-            # async for chunk in generator:
-            #     # logger.debug(f"[DEBUG] chunk={chunk}", flush=True)
-            #     meta_info = chunk['meta_info']
-            #     chunk_text = chunk["text"]
-            #     cleaned_chunk = self.trim_overlap(final_text, chunk_text)
-            #     final_text += cleaned_chunk
-            #     # logger.debug(f"[DEUBG] chunk={chunk}, chunk_text={chunk_text}, final_text={final_text}")
-            #     yield LLMRawResponse(
-            #         generated_text=final_text,
-            #         num_generated_tokens=meta_info['completion_tokens'],
-            #         # logprobs=log_probs,
-            #         # num_generated_tokens_batch=meta_info['completion_tokens'],
-            #         num_input_tokens=meta_info['prompt_tokens'],
-            #         # num_input_tokens_batch=meta_info['prompt_tokens'],
-            #         preprocessing_time=0,
-            #         generation_time=clock.reset_interval(),
-            #         # finish_reason=meta_info['finish_reason']['type'],
-            #         metadata=meta_info,
-            #     )
+           
         
 
         # # Loop over the results
