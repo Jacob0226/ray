@@ -214,13 +214,13 @@ class SGLangEngine(LLMEngine):
         # pg = placement_group([{"CPU": n_cpu}, {"GPU": n_gpu}], strategy="STRICT_PACK")
         # ray.get(pg.ready())
         # print(f"[DEBUG] SGLang node_initialization.placement_group.bundle_specs={node_initialization.placement_group.bundle_specs}", flush=True)
-        # print(f"[DEBUG] SGLang placement_group_table={placement_group_table(pg)}", flush=True)
+        print(f"[DEBUG] SGLang placement_group_table={placement_group_table(pg)}", flush=True)
         # print("\n\n\n\n", flush=True) 
         
         from transformers import AutoTokenizer
         engine_actor = SGLangEngineWorker.options(
                 num_gpus=n_gpu,
-                num_cpus=n_cpu,
+                num_cpus=0,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_capture_child_tasks=True,

@@ -148,7 +148,7 @@ class SGLangEngineConfig(BaseModelExtended):
         if self.resources_per_bundle:
             bundle = self.resources_per_bundle
         else:
-            bundle = {"GPU": self.num_devices, "CPU": self.deployment_config['ray_actor_options']['num_cpus']}
+            bundle = {"GPU": self.num_devices} # "CPU": self.deployment_config['ray_actor_options']['num_cpus']
         if self.accelerator_type:
             bundle[self.ray_accelerator_type()] = 0.001
         bundles = [bundle]
@@ -196,7 +196,7 @@ class SGLangEngineConfig(BaseModelExtended):
                 pg.id,
                 placement_group_table(pg),
             )
-            print(f"[DEBUG] pg={pg}", flush=True)
+            print(f"[DEBUG] SGLang pg={placement_group_table(pg)}", flush=True)
             print(f"[DEBUG] SGLang Using existing placement group\n\n", flush=True)
         else:
             if not ALLOW_NEW_PLACEMENT_GROUPS_IN_DEPLOYMENT:
